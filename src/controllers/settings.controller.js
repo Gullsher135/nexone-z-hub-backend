@@ -69,7 +69,12 @@ export const updateSettings = asyncHandler(async (req, res) => {
 // The address the server sees for this request. The admin uses it at the office to fill the allowed IP list.
 export const myIp = asyncHandler(async (req, res) => {
   const ip = clientIp(req);
-  res.json({ ip, isPrivate: isPrivateIp(ip) });
+  res.json({
+    ip,
+    isPrivate: isPrivateIp(ip),
+    // Shown only when the address looks wrong, to help find out which proxy hides the real one.
+    seen: { peer: String(req.ip || ''), forwardedFor: String(req.headers['x-forwarded-for'] || ''), cf: String(req.headers['cf-connecting-ip'] || '') },
+  });
 });
 
 // Turns a pasted Google Maps link (or "lat, lng" text) into coordinates for the office location.

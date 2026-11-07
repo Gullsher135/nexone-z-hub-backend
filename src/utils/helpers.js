@@ -1,3 +1,4 @@
+import { isPrivateIp } from './maps.js';
 import crypto from 'crypto';
 
 export class HttpError extends Error {
@@ -23,7 +24,20 @@ export const randomPassword = (len = 10) => {
 export const pick = (obj, keys) =>
   keys.reduce((acc, k) => (obj[k] !== undefined ? { ...acc, [k]: obj[k] } : acc), {});
 
-export const clientIp = (req) => String(req.ip || '').replace(/^::ffff:/, '');
+const stripV6 = (v) => String(v || '').split(',')[0].trim().replace(/^::ffff:/, '');
+
+// The visitor's public IP. On Render the app only sees an internal proxy address (10.x.x.x),
+// and the real address arrives in headers set by the platform's edge (Cloudflare). Those headers
+// are trusted only when the direct peer is itself a private/internal address, so a visitor who
+// reaches the app directly cannot fake them.
+export const clientIp = (req) => {
+  const peer = stripV6(req.ip);
+  if (isPrivateIp(peer)) {
+    const real = stripV6(req.headers['cf-connecting-ip']) || stripV6(req.headers['true-client-ip']);
+    if (real) return real;
+  }
+  return peer;
+};
 
 export const csvEscape = (v) => {
   const s = v === null || v === undefined ? '' : String(v);
