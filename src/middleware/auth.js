@@ -21,7 +21,6 @@ export const protect = asyncHandler(async (req, _res, next) => {
 
   const user = await User.findById(payload.id);
   if (!user || !user.isActive) throw new HttpError(401, 'Account is inactive');
-  if (user.role === 'student') throw new HttpError(403, 'Students do not have login access');
   if (internExpired(user)) throw new HttpError(403, 'Your internship period has ended');
 
   req.user = user;

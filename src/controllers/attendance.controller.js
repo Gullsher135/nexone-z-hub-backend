@@ -11,6 +11,12 @@ import {
 import { calcAttendance, employedOn, holidayOn, isOffDay } from '../utils/attendanceCalc.js';
 import { userMonthRows } from '../utils/reports.js';
 
+// The saved list, plus the address last reported by the office screen when that option is on.
+const allowedIpRules = (settings) => [
+  ...settings.allowedIps,
+  ...(settings.autoIpEnabled && settings.autoIp?.ip ? [settings.autoIp.ip] : []),
+];
+
 const ipAllowed = (ip, list) =>
   list.some((rule) => (rule.endsWith('*') ? ip.startsWith(rule.slice(0, -1)) : ip === rule));
 
@@ -28,8 +34,9 @@ function verifyPunch(req, settings, body) {
   if (settings.requireQr) {
     throw new HttpError(403, 'Check-in is only allowed by scanning the office QR code.');
   }
-  if (settings.enforceIp && settings.allowedIps.length) {
-    if (!ipAllowed(clientIp(req), settings.allowedIps)) {
+  const rules = allowedIpRules(settings);
+  if (settings.enforceIp && rules.length) {
+    if (!ipAllowed(clientIp(req), rules)) {
       throw new HttpError(403, 'You must be connected to the office network to check in.');
     }
   }

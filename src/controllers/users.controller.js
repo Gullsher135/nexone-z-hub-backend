@@ -3,6 +3,10 @@ import { Batch } from '../models/Batch.js';
 import { Attendance } from '../models/Attendance.js';
 import { StudentAttendance } from '../models/StudentAttendance.js';
 import { Leave } from '../models/Leave.js';
+import { Enrollment, Submission, QuizAttempt } from '../models/lms.js';
+import { FeeAccount, Payment, SalaryProfile, Payslip } from '../models/pay.js';
+import { Task } from '../models/crew.js';
+import { detachUser } from './flow.controller.js';
 import { HttpError, asyncHandler, escapeRegex, pick, randomPassword } from '../utils/helpers.js';
 
 const EDITABLE = [
@@ -11,6 +15,7 @@ const EDITABLE = [
 ];
 
 const isStaffLogin = (role) => role !== 'student';
+const MIN_PASSWORD = 8;
 
 // App-level guard in addition to the unique index, so the message is clear everywhere.
 async function assertEmailFree(email, excludeId) {
@@ -69,14 +74,24 @@ export const createUser = asyncHandler(async (req, res) => {
     data.password = tempPassword;
     data.mustChangePassword = !req.body.password;
     if (!data.joiningDate) data.joiningDate = new Date().toISOString().slice(0, 10);
-  } else if (data.batch) {
-    const b = await Batch.findById(data.batch);
-    if (!b) throw new HttpError(400, 'Batch not found');
+  } else {
+    if (data.batch) {
+      const b = await Batch.findById(data.batch);
+      if (!b) throw new HttpError(400, 'Batch not found');
+    }
+    // A student gets a login for the learning portal when an email is given and a login is asked for.
+    if (req.body.createLogin || req.body.password) {
+      if (!data.email) throw new HttpError(400, 'Add the student\'s email to give them a login');
+      tempPassword = req.body.password || randomPassword();
+      if (tempPassword.length < MIN_PASSWORD) throw new HttpError(400, 'Password must be at least 8 characters');
+      data.password = tempPassword;
+      data.mustChangePassword = !req.body.password;
+    }
   }
   if (role !== 'intern') delete data.internship;
 
   const user = await User.create(data);
-  res.status(201).json({ user, tempPassword: isStaffLogin(role) ? tempPassword : undefined });
+  res.status(201).json({ user, tempPassword });
 });
 
 export const updateUser = asyncHandler(async (req, res) => {
@@ -115,7 +130,9 @@ export const setActive = (isActive) =>
 export const resetPassword = asyncHandler(async (req, res) => {
   const user = await User.findById(req.params.id);
   if (!user) throw new HttpError(404, 'User not found');
-  if (!isStaffLogin(user.role)) throw new HttpError(400, 'Students do not have a login');
+  if (!isStaffLogin(user.role) && !user.email) {
+    throw new HttpError(400, 'Add the student\'s email first, then you can give them a login');
+  }
 
   const tempPassword = req.body?.password || randomPassword();
   if (tempPassword.length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
@@ -131,15 +148,18 @@ export const deleteUser = asyncHandler(async (req, res) => {
   if (String(user._id) === String(req.user._id)) {
     throw new HttpError(400, 'You cannot delete your own account');
   }
-  const [a, s, l] = await Promise.all([
+  const [a, s, l, pm, ps] = await Promise.all([
     Attendance.exists({ user: user._id }),
     StudentAttendance.exists({ student: user._id }),
     Leave.exists({ user: user._id }),
+    Payment.exists({ student: user._id }),
+    Payslip.exists({ user: user._id, status: 'paid' }),
   ]);
-  if ((a || s || l) && req.query.force !== 'true') {
-    throw new HttpError(409, 'This person has attendance history. Deactivate instead of deleting, or delete permanently together with all their records.');
+  const hasHistory = a || s || l || pm || ps;
+  if (hasHistory && req.query.force !== 'true') {
+    throw new HttpError(409, 'This person has attendance or payment history. Deactivate instead of deleting, or delete permanently together with all their records.');
   }
-  if (a || s || l) {
+  if (hasHistory) {
     // Permanent delete: remove their records first so nothing is left pointing at a missing person.
     await Promise.all([
       Attendance.deleteMany({ user: user._id }),
@@ -147,6 +167,17 @@ export const deleteUser = asyncHandler(async (req, res) => {
       Leave.deleteMany({ user: user._id }),
     ]);
   }
+  await Promise.all([
+    Enrollment.deleteMany({ student: user._id }),
+    Submission.deleteMany({ student: user._id }),
+    QuizAttempt.deleteMany({ student: user._id }),
+    FeeAccount.deleteMany({ student: user._id }),
+    Payment.deleteMany({ student: user._id }),
+    SalaryProfile.deleteMany({ user: user._id }),
+    Payslip.deleteMany({ user: user._id }),
+    Task.deleteMany({ assignee: user._id }),
+    detachUser(user._id),
+  ]);
   await user.deleteOne();
   res.json({ message: 'Deleted' });
 });

@@ -21,6 +21,11 @@ const settingSchema = new mongoose.Schema(
     },
     allowedIps: { type: [String], default: [] },
     enforceIp: { type: Boolean, default: false },
+    // When on, a device at the office reports the office's current public IP and it is allowed too.
+    autoIpEnabled: { type: Boolean, default: false },
+    autoIp: { ip: String, seenAt: Date },
+    officeSyncKey: { type: String, default: '' }, // secret in the link opened on a device that stays at the office
+    leaveQuota: { casual: { type: Number, default: 10, min: 0 }, sick: { type: Number, default: 8, min: 0 } }, // days per year
     requireQr: { type: Boolean, default: false }, // if true, button check-in is disabled
   },
   { timestamps: true }

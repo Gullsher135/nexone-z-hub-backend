@@ -43,6 +43,8 @@ Optional demo data: `npm run seed:demo`.
 
 To set the network check up from anywhere: open **Settings, Office network check**, type the office's **public IP** (from the router's Status / Internet / WAN page) and press **Add IP**. Private addresses (192.168.x.x, 10.x.x.x, 172.16-31.x.x, 100.64-127.x.x) are rejected because the server can never see them. **Add my current IP** is only for use while connected to the office Wi-Fi. If your office internet has no fixed IP, the address can change; ask the provider for a static IP, or add the new one when check-ins start being refused. If the address shown looks wrong or changes between requests, set `TRUST_PROXY=2` on Render.
 
+If the office internet address changes (no static IP), turn on **Update the office IP automatically** in the same section, press Save, press **Create the office link**, and open that private link on any device that stays at the office on the office network (a PC, laptop or old phone) and leave the page open. It calls `POST /api/office-sync/:key` every minute; the address the server sees is stored as `autoIp` and is allowed for check-in in addition to the manual list. The key can be replaced with **Make a new link** (`POST /api/settings/office-sync-key`).
+
 To set the office location from anywhere: open **Settings, Office location check**, press **Open Google Maps**, copy the share link of the office pin, paste it and press **Get location**. The server reads the coordinates from the link (long links, `maps.app.goo.gl` short links and plain `lat, lng` text all work). The location check uses the phone's GPS, which can be spoofed, so for strict control use **QR only**.
 
 ## API overview (all under `/api`, JWT in `Authorization: Bearer <token>`)
@@ -65,3 +67,9 @@ To set the office location from anywhere: open **Settings, Office location check
 - A person with attendance history is deactivated by default (history stays intact). The admin can still choose a permanent delete, which also removes that person's attendance and leave records (`DELETE /users/:id?force=true`).
 - One check-in and one check-out per day; the admin can correct anything via manual entry (a reason is required).
 - Login is rate limited (30 attempts / 15 min / IP).
+
+## NexoneZ Pay (fees and payroll)
+Endpoints under `/api/pay/*`: fee plans and installments, payments with numbered receipts (`RCPT-00001`), salary profiles, monthly payroll (generated from attendance, absent days deducted), payslips (paid ones are locked). No new environment variables. Redeploy backend and frontend.
+
+## NexoneZ Flow (projects)
+Endpoints under `/api/flow/*`: clients, projects (client, lead, team, deadline, budget visible to admin only), board cards (todo/doing/review/done) with comments, `my-work`, `overview`. Admin and project lead manage cards; assignees move their own cards. Removing a user unassigns their cards. No new environment variables.

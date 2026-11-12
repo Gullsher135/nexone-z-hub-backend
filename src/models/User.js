@@ -32,6 +32,10 @@ const userSchema = new mongoose.Schema(
       graceMinutes: { type: Number, default: 15, min: 0, max: 120 },
     },
 
+    // contact details the person can keep up to date themselves
+    address: { type: String, trim: true, maxlength: 300 },
+    emergencyContact: { name: { type: String, trim: true, maxlength: 80 }, phone: { type: String, trim: true, maxlength: 30 } },
+
     // intern only
     internship: {
       startDate: dateField,

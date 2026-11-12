@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { getSettings } from '../models/Setting.js';
 import { HttpError, asyncHandler, clientIp } from '../utils/helpers.js';
 import { DATE_RE } from '../utils/time.js';
@@ -27,6 +28,14 @@ export const updateSettings = asyncHandler(async (req, res) => {
     }
     s.weekendDays = [...new Set(b.weekendDays)];
   }
+  if (b.leaveQuota !== undefined) {
+    for (const k of ['casual', 'sick']) {
+      if (b.leaveQuota[k] === undefined) continue;
+      const n = Number(b.leaveQuota[k]);
+      if (!Number.isFinite(n) || n < 0 || n > 366) throw new HttpError(400, 'Leave days must be between 0 and 366');
+      s.leaveQuota[k] = n;
+    }
+  }
   if (b.holidays !== undefined) {
     if (!Array.isArray(b.holidays) || b.holidays.some((h) => !DATE_RE.test(h?.date || ''))) {
       throw new HttpError(400, 'Each holiday needs a date (YYYY-MM-DD)');
@@ -54,9 +63,10 @@ export const updateSettings = asyncHandler(async (req, res) => {
     }
     s.allowedIps = [...new Set(raw.map(normalizeIpRule))];
   }
+  if (b.autoIpEnabled !== undefined) s.autoIpEnabled = !!b.autoIpEnabled;
   if (b.enforceIp !== undefined) {
     s.enforceIp = !!b.enforceIp;
-    if (s.enforceIp && !s.allowedIps.length) {
+    if (s.enforceIp && !s.allowedIps.length && !(s.autoIpEnabled && s.autoIp?.ip)) {
       throw new HttpError(400, 'Add at least one allowed IP address before enabling the network check');
     }
   }
@@ -91,4 +101,37 @@ export const resolveMap = asyncHandler(async (req, res) => {
     throw new HttpError(422, 'No location found in that link. Use the Share button in Google Maps, or paste coordinates such as 33.5651, 71.4429.');
   }
   res.json(found);
+});
+
+// Admin: make (or replace) the secret link that a device at the office keeps open.
+export const rotateSyncKey = asyncHandler(async (_req, res) => {
+  const s = await getSettings();
+  s.officeSyncKey = crypto.randomBytes(18).toString('hex');
+  await s.save();
+  res.json({ settings: s });
+});
+
+const sameKey = (a, b) => {
+  const x = Buffer.from(String(a || ''));
+  const y = Buffer.from(String(b || ''));
+  return x.length > 0 && x.length === y.length && crypto.timingSafeEqual(x, y);
+};
+
+// Public, but only with the secret key. A device at the office calls this every minute; the address the
+// server sees is the office's current public IP, which is then allowed for check-in.
+export const officeSync = asyncHandler(async (req, res) => {
+  const s = await getSettings();
+  if (!s.autoIpEnabled || !sameKey(req.params.key, s.officeSyncKey)) {
+    throw new HttpError(404, 'This link is not valid, or the automatic office IP option is turned off.');
+  }
+  const ip = clientIp(req);
+  if (!ip || isPrivateIp(ip)) {
+    throw new HttpError(400, 'The server cannot see a public internet address for this device.');
+  }
+  const stale = !s.autoIp?.seenAt || Date.now() - new Date(s.autoIp.seenAt).getTime() > 5 * 60 * 1000;
+  if (s.autoIp?.ip !== ip || stale) {
+    s.autoIp = { ip, seenAt: new Date() };
+    await s.save();
+  }
+  res.json({ ok: true, ip });
 });

@@ -11,7 +11,6 @@ export const login = asyncHandler(async (req, res) => {
   if (!user || !(await user.comparePassword(password))) {
     throw new HttpError(401, 'Invalid email or password');
   }
-  if (user.role === 'student') throw new HttpError(403, 'Students do not have login access');
   if (!user.isActive) throw new HttpError(403, 'Your account has been deactivated');
   if (internExpired(user)) throw new HttpError(403, 'Your internship period has ended');
 
