@@ -7,6 +7,7 @@ import { Enrollment, Submission, QuizAttempt } from '../models/lms.js';
 import { FeeAccount, Payment, SalaryProfile, Payslip } from '../models/pay.js';
 import { Task } from '../models/crew.js';
 import { detachUser } from './flow.controller.js';
+import { Letter } from '../models/docs.js';
 import { HttpError, asyncHandler, escapeRegex, pick, randomPassword } from '../utils/helpers.js';
 
 const EDITABLE = [
@@ -148,16 +149,17 @@ export const deleteUser = asyncHandler(async (req, res) => {
   if (String(user._id) === String(req.user._id)) {
     throw new HttpError(400, 'You cannot delete your own account');
   }
-  const [a, s, l, pm, ps] = await Promise.all([
+  const [a, s, l, pm, ps, lt] = await Promise.all([
     Attendance.exists({ user: user._id }),
     StudentAttendance.exists({ student: user._id }),
     Leave.exists({ user: user._id }),
     Payment.exists({ student: user._id }),
     Payslip.exists({ user: user._id, status: 'paid' }),
+    Letter.exists({ user: user._id }),
   ]);
-  const hasHistory = a || s || l || pm || ps;
+  const hasHistory = a || s || l || pm || ps || lt;
   if (hasHistory && req.query.force !== 'true') {
-    throw new HttpError(409, 'This person has attendance or payment history. Deactivate instead of deleting, or delete permanently together with all their records.');
+    throw new HttpError(409, 'This person has attendance, payment or letter history. Deactivate instead of deleting, or delete permanently together with all their records.');
   }
   if (hasHistory) {
     // Permanent delete: remove their records first so nothing is left pointing at a missing person.
@@ -177,6 +179,7 @@ export const deleteUser = asyncHandler(async (req, res) => {
     Payslip.deleteMany({ user: user._id }),
     Task.deleteMany({ assignee: user._id }),
     detachUser(user._id),
+    Letter.deleteMany({ user: user._id }),
   ]);
   await user.deleteOne();
   res.json({ message: 'Deleted' });

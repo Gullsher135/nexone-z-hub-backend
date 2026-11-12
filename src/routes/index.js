@@ -13,6 +13,7 @@ import * as lms from '../controllers/lms.controller.js';
 import * as crew from '../controllers/crew.controller.js';
 import * as pay from '../controllers/pay.controller.js';
 import * as flow from '../controllers/flow.controller.js';
+import * as docs from '../controllers/docs.controller.js';
 
 const router = Router();
 
@@ -161,6 +162,17 @@ router.post('/pay/payslips/:id/pay', protect, adminOnly, pay.payPayslip);
 router.delete('/pay/payslips/:id', protect, adminOnly, pay.deletePayslip);
 router.get('/pay/my-payslips', protect, staffOnly, pay.myPayslips);
 router.get('/pay/payslips/:id', protect, pay.payslip);
+
+// ---- Letters and certificates (HR) ----
+router.get('/docs/verify/:code', syncLimiter, docs.verify);
+router.get('/docs/suggest/:userId', protect, adminOnly, docs.suggest);
+router.get('/docs/eligible', protect, adminOnly, docs.eligible);
+router.get('/docs/letters', protect, adminOnly, docs.listLetters);
+router.post('/docs/letters', protect, adminOnly, docs.createLetter);
+router.get('/docs/my', protect, staffOnly, docs.myLetters);
+router.get('/docs/letters/:id', protect, docs.getLetter);
+router.post('/docs/letters/:id/revoke', protect, adminOnly, docs.revokeLetter);
+router.post('/docs/letters/:id/acknowledge', protect, staffOnly, docs.acknowledge);
 
 // ---- NexoneZ Flow (projects) ----
 router.get('/flow/overview', protect, adminOnly, flow.overview);

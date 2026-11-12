@@ -73,3 +73,6 @@ Endpoints under `/api/pay/*`: fee plans and installments, payments with numbered
 
 ## NexoneZ Flow (projects)
 Endpoints under `/api/flow/*`: clients, projects (client, lead, team, deadline, budget visible to admin only), board cards (todo/doing/review/done) with comments, `my-work`, `overview`. Admin and project lead manage cards; assignees move their own cards. Removing a user unassigns their cards. No new environment variables.
+
+## Letters and certificates (Crew)
+Endpoints under `/api/docs/*`: internship certificates (only after the internship end date), experience letters (projects pulled from Flow), warning/notice letters (acknowledged by the employee), revoke, and public QR verification at `/api/docs/verify/:code` (warnings are never public). Course certificates use the same QR design. No new environment variables.
