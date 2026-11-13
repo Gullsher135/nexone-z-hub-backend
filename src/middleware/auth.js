@@ -36,3 +36,5 @@ export const requireRole = (...roles) => (req, _res, next) => {
 
 export const adminOnly = requireRole('admin');
 export const staffOnly = requireRole('employee', 'intern');
+// Everyone who can work in the Learn module (what they can touch is still limited to their own courses).
+export const teachRoles = requireRole('admin', 'employee', 'intern', 'teacher');

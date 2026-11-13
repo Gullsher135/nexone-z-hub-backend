@@ -1,10 +1,20 @@
 import { StudentAttendance } from '../models/StudentAttendance.js';
 import { User } from '../models/User.js';
 import { Batch } from '../models/Batch.js';
+import { Course } from '../models/lms.js';
 import { HttpError, asyncHandler } from '../utils/helpers.js';
 import { DATE_RE, MONTH_RE, currentMonth, dateKey, monthRange } from '../utils/time.js';
 
 const STATUSES = ['present', 'absent', 'late', 'leave'];
+
+// Admin may mark any batch. A teacher may only work with batches that belong to a course they teach.
+async function assertBatchAccess(user, batchId) {
+  if (user.role === 'admin') return;
+  const b = await Batch.findById(batchId).select('courseId');
+  if (!b?.courseId || !(await Course.exists({ _id: b.courseId, instructors: user._id }))) {
+    throw new HttpError(403, 'You can only take attendance for batches of your own courses');
+  }
+}
 
 // Natural sort (roll no. 2 before 10), done in JS so it works on any MongoDB-compatible server.
 const studentsOf = async (batch) => {
@@ -18,6 +28,7 @@ export const getSheet = asyncHandler(async (req, res) => {
   const date = req.query.date || dateKey();
   if (!batch) throw new HttpError(400, 'batch is required');
   if (!DATE_RE.test(date)) throw new HttpError(400, 'date must be YYYY-MM-DD');
+  await assertBatchAccess(req.user, batch);
   const b = await Batch.findById(batch);
   if (!b) throw new HttpError(404, 'Batch not found');
 
@@ -42,6 +53,7 @@ export const saveSheet = asyncHandler(async (req, res) => {
   if (!DATE_RE.test(date || '')) throw new HttpError(400, 'A valid date is required');
   if (date > dateKey()) throw new HttpError(400, 'You cannot mark attendance for a future date');
   if (!Array.isArray(records)) throw new HttpError(400, 'records must be an array');
+  await assertBatchAccess(req.user, batch);
   const b = await Batch.findById(batch);
   if (!b) throw new HttpError(404, 'Batch not found');
 
@@ -71,6 +83,7 @@ export const batchSummary = asyncHandler(async (req, res) => {
   const month = req.query.month || currentMonth();
   if (!batch) throw new HttpError(400, 'batch is required');
   if (!MONTH_RE.test(month)) throw new HttpError(400, 'month must be YYYY-MM');
+  await assertBatchAccess(req.user, batch);
   const { from, to } = monthRange(month);
 
   const students = await studentsOf(batch);

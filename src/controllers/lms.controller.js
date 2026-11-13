@@ -1,8 +1,12 @@
 import crypto from 'crypto';
 import { Course, Enrollment, Assignment, Submission, Quiz, QuizAttempt, Announcement } from '../models/lms.js';
-import { User } from '../models/User.js';
+import mongoose from 'mongoose';
+import { User, STAFF_ROLES } from '../models/User.js';
+import { Batch } from '../models/Batch.js';
+import { StudentAttendance } from '../models/StudentAttendance.js';
+import { computeProgress, progressKey } from '../utils/progress.js';
 import { nextSeq } from '../models/Counter.js';
-import { HttpError, asyncHandler, pick } from '../utils/helpers.js';
+import { HttpError, asyncHandler, pick, randomPassword } from '../utils/helpers.js';
 import { dateKey, DATE_RE } from '../utils/time.js';
 
 const isAdmin = (u) => u.role === 'admin';
@@ -12,6 +16,15 @@ const sid = (v) => String(v?._id || v);
 const lessonIds = (course) => course.sections.flatMap((s) => s.lessons.map((l) => sid(l._id)));
 const percent = (done, total) => (total ? Math.round((done / total) * 100) : 0);
 const COURSE_FIELDS = ['title', 'category', 'level', 'summary', 'description', 'color', 'durationWeeks', 'autoCertificate'];
+
+// Who can be a course instructor: a teacher-only login, or an employee/intern who was given teacher access.
+const TEACHER_FILTER = { isActive: true, $or: [{ role: 'teacher' }, { role: { $in: STAFF_ROLES }, isTeacher: true }] };
+async function onlyTeachers(ids, keep = []) {
+  const wanted = [...new Set((ids || []).map(String))].filter((i) => mongoose.isValidObjectId(i));
+  const ok = await User.find({ _id: { $in: wanted }, ...TEACHER_FILTER }).select('_id').lean();
+  const keepSet = new Set(keep.map(String)); // someone already teaching the course is never dropped silently
+  return wanted.filter((i) => keepSet.has(i) || ok.some((o) => String(o._id) === i));
+}
 
 const canManage = (user, course) =>
   isAdmin(user) || (!isStudent(user) && course.instructors.some((i) => sid(i) === sid(user._id)));
@@ -48,6 +61,9 @@ export const listCourses = asyncHandler(async (req, res) => {
     { $group: { _id: '$course', n: { $sum: 1 } } },
   ]);
   const cmap = new Map(counts.map((c) => [sid(c._id), c.n]));
+  const prog = isStudent(u)
+    ? await computeProgress(courses.map((c) => ({ course: c, enrollment: enrollMap.get(sid(c._id)), student: u })))
+    : new Map();
   const items = courses.map((c) => {
     const total = c.sections.reduce((a, s) => a + s.lessons.length, 0);
     const e = enrollMap.get(sid(c._id));
@@ -55,7 +71,7 @@ export const listCourses = asyncHandler(async (req, res) => {
       _id: c._id, code: c.code, title: c.title, category: c.category, level: c.level, summary: c.summary,
       color: c.color, durationWeeks: c.durationWeeks, status: c.status, lessonCount: total,
       studentCount: cmap.get(sid(c._id)) || 0,
-      ...(e ? { progress: percent(e.completedLessons.length, total), completed: !!e.completedAt, certificate: e.certificate?.code } : {}),
+      ...(e ? { progress: prog.get(progressKey(c, u))?.overall ?? 0, completed: !!e.completedAt, certificate: e.certificate?.code } : {}),
     };
   });
   res.json({ items });
@@ -65,7 +81,7 @@ export const createCourse = asyncHandler(async (req, res) => {
   if (!req.body?.title) throw new HttpError(400, 'Course title is required');
   const n = await nextSeq('course');
   const data = pick(req.body, COURSE_FIELDS);
-  if (Array.isArray(req.body.instructors)) data.instructors = req.body.instructors;
+  if (Array.isArray(req.body.instructors)) data.instructors = await onlyTeachers(req.body.instructors);
   const course = await Course.create({ ...data, code: `NZL-${String(n).padStart(3, '0')}` });
   res.status(201).json({ course });
 });
@@ -75,12 +91,19 @@ export const getCourse = asyncHandler(async (req, res) => {
   await course.populate('instructors', 'name email role');
   const obj = course.toObject();
   const total = lessonIds(course).length;
+  let overall = 0;
+  if (enrollment) overall = (await computeProgress([{ course, enrollment, student: req.user }])).get(progressKey(course, req.user))?.overall ?? 0;
   res.json({
     course: obj,
     manage,
     lessonCount: total,
     enrollment: enrollment
-      ? { completedLessons: enrollment.completedLessons.map(String), lastLesson: enrollment.lastLesson, progress: percent(enrollment.completedLessons.length, total), completedAt: enrollment.completedAt, certificate: enrollment.certificate?.code ? enrollment.certificate : undefined }
+      ? {
+        completedLessons: enrollment.completedLessons.map(String), lastLesson: enrollment.lastLesson,
+        progress: overall, // attendance + assignments + quizzes
+        lessons: { done: enrollment.completedLessons.length, total, percent: percent(enrollment.completedLessons.length, total) },
+        completedAt: enrollment.completedAt, certificate: enrollment.certificate?.code ? enrollment.certificate : undefined,
+      }
       : undefined,
   });
 });
@@ -88,9 +111,10 @@ export const getCourse = asyncHandler(async (req, res) => {
 export const updateCourse = asyncHandler(async (req, res) => {
   const { course } = await access(req);
   if (!canManage(req.user, course)) throw new HttpError(403, 'Not allowed');
-  Object.assign(course, pick(req.body, COURSE_FIELDS));
+  // Certificates are the admin's call: a teacher cannot switch automatic certificates on or off.
+  Object.assign(course, pick(req.body, isAdmin(req.user) ? COURSE_FIELDS : COURSE_FIELDS.filter((f) => f !== 'autoCertificate')));
   if (req.body.status && ['draft', 'published'].includes(req.body.status)) course.status = req.body.status;
-  if (isAdmin(req.user) && Array.isArray(req.body.instructors)) course.instructors = req.body.instructors;
+  if (isAdmin(req.user) && Array.isArray(req.body.instructors)) course.instructors = await onlyTeachers(req.body.instructors, course.instructors);
   await course.save();
   res.json({ course });
 });
@@ -122,6 +146,7 @@ export const deleteCourse = asyncHandler(async (req, res) => {
   if (!course) throw new HttpError(404, 'Course not found');
   const f = { course: course._id };
   await Promise.all([Enrollment.deleteMany(f), Assignment.deleteMany(f), Submission.deleteMany(f), Quiz.deleteMany(f), QuizAttempt.deleteMany(f), Announcement.deleteMany(f)]);
+  await Batch.updateMany({ courseId: course._id }, { $unset: { courseId: '' } }).catch(() => {});
   await course.deleteOne();
   res.json({ message: 'Deleted' });
 });
@@ -130,12 +155,23 @@ export const deleteCourse = asyncHandler(async (req, res) => {
 export const listStudents = asyncHandler(async (req, res) => {
   const { course } = await access(req);
   const total = lessonIds(course).length;
-  const ens = await Enrollment.find({ course: course._id }).populate('student', 'name code email batch isActive').lean();
+  const ens = (await Enrollment.find({ course: course._id }).populate('student', 'name code email batch isActive').lean()).filter((e) => e.student);
+  const prog = await computeProgress(ens.map((e) => ({ course, enrollment: e, student: e.student })));
+  const batchIds = [...new Set(ens.map((e) => e.batch || e.student.batch).filter(Boolean).map(sid))];
+  const batchName = new Map((await Batch.find({ _id: { $in: batchIds } }).select('name').lean()).map((b) => [sid(b._id), b.name]));
   res.json({
-    items: ens.filter((e) => e.student).map((e) => ({
-      _id: e._id, student: e.student, progress: percent(e.completedLessons.length, total),
-      completedAt: e.completedAt, certificate: e.certificate?.code, enrolledAt: e.createdAt,
-    })),
+    items: ens.map((e) => {
+      const p = prog.get(progressKey(course, e.student));
+      const bid = e.batch || e.student.batch;
+      return {
+        _id: e._id, student: e.student,
+        progress: p.overall, hasData: p.hasData, weakest: p.weakest,
+        parts: { attendance: p.parts.attendance.percent, assignments: p.parts.assignments.percent, quizzes: p.parts.quizzes.percent },
+        lessons: { done: e.completedLessons.length, total, percent: percent(e.completedLessons.length, total) },
+        batch: bid ? { _id: bid, name: batchName.get(sid(bid)) || '' } : null,
+        completedAt: e.completedAt, certificate: e.certificate?.code, enrolledAt: e.createdAt,
+      };
+    }),
   });
 });
 
@@ -143,6 +179,9 @@ export const enroll = asyncHandler(async (req, res) => {
   const { course } = await access(req);
   const ids = new Set((req.body.studentIds || []).map(String));
   if (req.body.batchId) {
+    const b = await Batch.findById(req.body.batchId).select('courseId');
+    if (!b) throw new HttpError(400, 'Batch not found');
+    if (b.courseId && sid(b.courseId) !== sid(course._id)) throw new HttpError(400, 'That batch belongs to another course');
     const inBatch = await User.find({ role: 'student', isActive: true, batch: req.body.batchId }).select('_id');
     inBatch.forEach((s) => ids.add(sid(s)));
   }
@@ -193,7 +232,8 @@ export const setProgress = asyncHandler(async (req, res) => {
   enrollment.completedAt = complete ? enrollment.completedAt || new Date() : undefined;
   await enrollment.save();
   if (complete && course.autoCertificate) await issueCertificate(enrollment);
-  res.json({ progress: percent(set.size, all.length), completedAt: enrollment.completedAt, certificate: enrollment.certificate?.code ? enrollment.certificate : undefined });
+  const overall = (await computeProgress([{ course, enrollment, student: req.user }])).get(progressKey(course, req.user))?.overall ?? 0;
+  res.json({ progress: overall, lessons: { done: set.size, total: all.length, percent: percent(set.size, all.length) }, completedAt: enrollment.completedAt, certificate: enrollment.certificate?.code ? enrollment.certificate : undefined });
 });
 
 export const issueManual = asyncHandler(async (req, res) => {
@@ -207,9 +247,9 @@ export const issueManual = asyncHandler(async (req, res) => {
 
 export const verifyCertificate = asyncHandler(async (req, res) => {
   const code = String(req.params.code || '').trim().toUpperCase();
-  const e = await Enrollment.findOne({ 'certificate.code': code }).populate('student', 'name code').populate('course', 'title code durationWeeks');
+  const e = await Enrollment.findOne({ 'certificate.code': code }).populate('student', 'name code').populate('course', 'title code durationWeeks category');
   if (!e || !e.student || !e.course) throw new HttpError(404, 'No certificate found with this code');
-  res.json({ valid: true, code, student: e.student.name, studentCode: e.student.code, course: e.course.title, courseCode: e.course.code, issuedAt: e.certificate.issuedAt, completedAt: e.completedAt });
+  res.json({ valid: true, code, student: e.student.name, studentCode: e.student.code, course: e.course.title, courseCode: e.course.code, category: e.course.category || '', issuedAt: e.certificate.issuedAt, completedAt: e.completedAt });
 });
 
 // ----- assignments -----
@@ -439,9 +479,10 @@ export const myOverview = asyncHandler(async (req, res) => {
     .filter((a) => !done.has(sid(a._id)))
     .map((a) => ({ _id: a._id, course: a.course, title: a.title, dueDate: a.dueDate, overdue: !!a.dueDate && a.dueDate < today, courseTitle: live.find((e) => sid(e.course._id) === sid(a.course))?.course.title }))
     .sort((x, y) => (x.dueDate || '9999').localeCompare(y.dueDate || '9999'));
+  const prog = await computeProgress(live.map((e) => ({ course: e.course, enrollment: e, student: req.user })));
   const courses = live.map((e) => {
     const total = e.course.sections.reduce((a, s) => a + s.lessons.length, 0);
-    return { _id: e.course._id, title: e.course.title, code: e.course.code, color: e.course.color, category: e.course.category, lessonCount: total, progress: percent(e.completedLessons.length, total), completed: !!e.completedAt, certificate: e.certificate?.code };
+    return { _id: e.course._id, title: e.course.title, code: e.course.code, color: e.course.color, category: e.course.category, lessonCount: total, progress: prog.get(progressKey(e.course, req.user))?.overall ?? 0, completed: !!e.completedAt, certificate: e.certificate?.code };
   });
   res.json({
     courses,
@@ -475,6 +516,238 @@ export const studentPool = asyncHandler(async (_req, res) => {
 });
 
 export const staffPool = asyncHandler(async (_req, res) => {
-  const items = await User.find({ role: { $in: ['employee', 'intern'] }, isActive: true }).select('name code role designation').sort({ name: 1 }).lean();
+  const items = await User.find(TEACHER_FILTER).select('name code role designation').sort({ name: 1 }).lean();
+  res.json({ items });
+});
+
+// ----- progress details (attendance + assignments + quizzes) -----
+async function progressDetail(course, student) {
+  const enrollment = await Enrollment.findOne({ course: course._id, student: student._id });
+  if (!enrollment) throw new HttpError(404, 'This student is not enrolled in the course');
+  const progress = (await computeProgress([{ course, enrollment, student }])).get(progressKey(course, student));
+  const bid = enrollment.batch || student.batch;
+  const b = bid ? await Batch.findById(bid).select('name courseId').lean() : null;
+  const total = lessonIds(course).length;
+  return {
+    progress,
+    batch: b && (!b.courseId || sid(b.courseId) === sid(course._id)) ? { _id: b._id, name: b.name } : null,
+    lessons: { done: enrollment.completedLessons.length, total, percent: percent(enrollment.completedLessons.length, total) },
+  };
+}
+
+// Teacher / admin: one student's full breakdown.
+export const studentProgress = asyncHandler(async (req, res) => {
+  const { course, manage } = await access(req);
+  if (!manage) throw new HttpError(403, 'Not allowed');
+  const student = await User.findOne({ _id: req.params.studentId, role: 'student' }).select('name code email batch');
+  if (!student) throw new HttpError(404, 'Student not found');
+  res.json({ student: { _id: student._id, name: student.name, code: student.code }, ...(await progressDetail(course, student)) });
+});
+
+// Student: my own breakdown.
+export const myProgress = asyncHandler(async (req, res) => {
+  if (!isStudent(req.user)) throw new HttpError(403, 'Only students have a progress report');
+  const { course } = await access(req);
+  res.json({ student: { _id: req.user._id, name: req.user.name, code: req.user.code }, ...(await progressDetail(course, req.user)) });
+});
+
+// ----- batches inside a course -----
+const BATCH_FIELDS = ['name', 'instructor', 'schedule', 'startDate', 'endDate', 'isActive'];
+
+async function manageCourse(req) {
+  const { course, manage } = await access(req);
+  if (!manage) throw new HttpError(403, 'Not allowed');
+  return course;
+}
+
+async function assertBatchNameFree(courseId, name, exceptId) {
+  const clash = await Batch.findOne({ courseId, name: String(name).trim() }).select('_id');
+  if (clash && sid(clash._id) !== sid(exceptId)) throw new HttpError(409, 'This course already has a batch with this name');
+}
+
+export const listCourseBatches = asyncHandler(async (req, res) => {
+  const course = await manageCourse(req);
+  const batches = await Batch.find({ courseId: course._id }).sort({ createdAt: -1 }).lean();
+  const ids = batches.map((b) => b._id);
+  const [enrolled, inBatch, withoutBatch, linkable] = await Promise.all([
+    Enrollment.aggregate([{ $match: { course: course._id, batch: { $in: ids } } }, { $group: { _id: '$batch', n: { $sum: 1 } } }]),
+    User.aggregate([{ $match: { role: 'student', isActive: true, batch: { $in: ids } } }, { $group: { _id: '$batch', n: { $sum: 1 } } }]),
+    Enrollment.countDocuments({ course: course._id, batch: null }),
+    Batch.find({ courseId: null, isActive: true }).select('name course').sort({ name: 1 }).lean(), // older batches not yet linked to a course
+  ]);
+  const em = new Map(enrolled.map((x) => [sid(x._id), x.n]));
+  const sm = new Map(inBatch.map((x) => [sid(x._id), x.n]));
+  res.json({
+    items: batches.map((b) => ({ ...b, enrolled: em.get(sid(b._id)) || 0, studentCount: sm.get(sid(b._id)) || 0 })),
+    withoutBatch,
+    linkable,
+  });
+});
+
+export const createCourseBatch = asyncHandler(async (req, res) => {
+  const course = await manageCourse(req);
+  const data = pick(req.body || {}, BATCH_FIELDS);
+  if (!data.name?.trim()) throw new HttpError(400, 'Batch name is required');
+  await assertBatchNameFree(course._id, data.name);
+  const batch = await Batch.create({ ...data, courseId: course._id, course: course.title });
+  res.status(201).json({ batch });
+});
+
+export const updateCourseBatch = asyncHandler(async (req, res) => {
+  const course = await manageCourse(req);
+  const batch = await Batch.findOne({ _id: req.params.batchId, courseId: course._id });
+  if (!batch) throw new HttpError(404, 'Batch not found in this course');
+  const data = pick(req.body || {}, BATCH_FIELDS);
+  if (data.name !== undefined) {
+    if (!String(data.name).trim()) throw new HttpError(400, 'Batch name is required');
+    await assertBatchNameFree(course._id, data.name, batch._id);
+  }
+  Object.assign(batch, data);
+  await batch.save();
+  res.json({ batch });
+});
+
+export const deleteCourseBatch = asyncHandler(async (req, res) => {
+  const course = await manageCourse(req);
+  const batch = await Batch.findOne({ _id: req.params.batchId, courseId: course._id });
+  if (!batch) throw new HttpError(404, 'Batch not found in this course');
+  const [e, u, a] = await Promise.all([
+    Enrollment.exists({ batch: batch._id }),
+    User.exists({ batch: batch._id }),
+    StudentAttendance.exists({ batch: batch._id }),
+  ]);
+  if (e || u || a) throw new HttpError(409, 'This batch has students or attendance. Mark it as finished instead.');
+  await batch.deleteOne();
+  res.json({ message: 'Deleted' });
+});
+
+// Attach an older batch (created before batches belonged to courses) to this course.
+export const linkCourseBatch = asyncHandler(async (req, res) => {
+  const course = await manageCourse(req);
+  const batch = await Batch.findById(req.body?.batchId);
+  if (!batch) throw new HttpError(404, 'Batch not found');
+  if (batch.courseId) throw new HttpError(409, 'This batch already belongs to a course');
+  await assertBatchNameFree(course._id, batch.name);
+  batch.courseId = course._id;
+  batch.course = course.title;
+  await batch.save();
+  // students already sitting in this batch are enrolled in the course and tied to the batch
+  const members = await User.find({ role: 'student', isActive: true, batch: batch._id }).select('_id');
+  for (const m of members) {
+    await Enrollment.updateOne({ course: course._id, student: m._id }, { $set: { batch: batch._id }, $setOnInsert: { course: course._id, student: m._id, completedLessons: [] } }, { upsert: true });
+  }
+  res.json({ batch, enrolled: members.length });
+});
+
+// Enrol students into the course inside one of its batches.
+export const addStudentsToBatch = asyncHandler(async (req, res) => {
+  const course = await manageCourse(req);
+  const batch = await Batch.findOne({ _id: req.params.batchId, courseId: course._id });
+  if (!batch) throw new HttpError(404, 'Batch not found in this course');
+  const ids = [...new Set((req.body?.studentIds || []).map(String))];
+  if (!ids.length) throw new HttpError(400, 'Choose at least one student');
+  const students = await User.find({ _id: { $in: ids }, role: 'student', isActive: true }).select('_id batch');
+  let added = 0;
+  let moved = 0;
+  for (const st of students) {
+    const r = await Enrollment.updateOne(
+      { course: course._id, student: st._id },
+      { $set: { batch: batch._id }, $setOnInsert: { course: course._id, student: st._id, completedLessons: [] } },
+      { upsert: true }
+    );
+    if (r.upsertedCount) added++;
+    if (st.batch && sid(st.batch) !== sid(batch._id)) moved++;
+  }
+  // class attendance is taken per batch, and a student sits in one batch at a time
+  await User.updateMany({ _id: { $in: students.map((x) => x._id) } }, { $set: { batch: batch._id } });
+  res.json({ added, updated: students.length - added, moved });
+});
+
+// ----- teachers (admin only) -----
+// Two kinds of teacher:
+//  - a new person: gets a login with role 'teacher' and only sees the teacher portal;
+//  - an existing employee / intern: keeps their own login, and `isTeacher` adds the teacher portal on top.
+const TEACHER_FIELDS = 'name code role email phone designation isActive isTeacher mustChangePassword createdAt';
+
+async function setCourseList(userId, courseIds) {
+  const ids = [...new Set((courseIds || []).map(String))].filter((i) => mongoose.isValidObjectId(i));
+  await Course.updateMany({ _id: { $in: ids } }, { $addToSet: { instructors: userId } });
+  await Course.updateMany({ _id: { $nin: ids }, instructors: userId }, { $pull: { instructors: userId } });
+}
+
+async function teacherView(user) {
+  const courses = await Course.find({ instructors: user._id }).select('title code').lean();
+  return { ...(user.toJSON?.() ?? user), type: user.role === 'teacher' ? 'new' : 'employee', courses };
+}
+
+export const listTeachers = asyncHandler(async (_req, res) => {
+  const [users, candidates, allCourses] = await Promise.all([
+    User.find({ $or: [{ role: 'teacher' }, { role: { $in: STAFF_ROLES }, isTeacher: true }] }).select(TEACHER_FIELDS).sort({ name: 1 }).lean(),
+    User.find({ role: { $in: STAFF_ROLES }, isActive: true, isTeacher: { $ne: true } }).select('name code role designation email').sort({ name: 1 }).lean(),
+    Course.find().select('title code status instructors').sort({ title: 1 }).lean(),
+  ]);
+  const items = users.map((u) => ({
+    ...u,
+    type: u.role === 'teacher' ? 'new' : 'employee',
+    courses: allCourses.filter((c) => c.instructors.some((i) => sid(i) === sid(u._id))).map((c) => ({ _id: c._id, title: c.title, code: c.code })),
+  }));
+  res.json({ items, candidates, courses: allCourses.map((c) => ({ _id: c._id, title: c.title, code: c.code, status: c.status })) });
+});
+
+export const createTeacher = asyncHandler(async (req, res) => {
+  const b = req.body || {};
+  if (b.mode === 'existing') {
+    // Already works here: no new login. They sign in as before and the teacher portal appears for them.
+    const u = await User.findOne({ _id: b.userId, role: { $in: STAFF_ROLES }, isActive: true });
+    if (!u) throw new HttpError(404, 'Choose an active employee or intern');
+    u.isTeacher = true;
+    await u.save();
+    await setCourseList(u._id, b.courseIds);
+    return res.status(201).json({ teacher: await teacherView(u) });
+  }
+
+  // A new person: needs a login.
+  if (!String(b.name || '').trim()) throw new HttpError(400, 'Name is required');
+  const email = String(b.email || '').toLowerCase().trim();
+  if (!email) throw new HttpError(400, 'Email is required: it is the teacher\'s login');
+  if (await User.exists({ email })) throw new HttpError(409, 'Someone with this email already exists. If they already work here, add them with "Existing employee" instead.');
+  const password = b.password || randomPassword();
+  if (password.length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
+  const u = await User.create({
+    role: 'teacher', name: b.name, email, phone: b.phone || undefined, designation: b.designation || undefined,
+    password, mustChangePassword: !b.password, joiningDate: new Date().toISOString().slice(0, 10),
+  });
+  await setCourseList(u._id, b.courseIds);
+  res.status(201).json({ teacher: await teacherView(u), tempPassword: password });
+});
+
+async function findTeacher(id) {
+  const u = await User.findOne({ _id: id, $or: [{ role: 'teacher' }, { role: { $in: STAFF_ROLES }, isTeacher: true }] });
+  if (!u) throw new HttpError(404, 'Teacher not found');
+  return u;
+}
+
+export const setTeacherCourses = asyncHandler(async (req, res) => {
+  const u = await findTeacher(req.params.id);
+  await setCourseList(u._id, req.body?.courseIds);
+  res.json({ teacher: await teacherView(u) });
+});
+
+// Takes teacher access away from an employee / intern. Their own login and employee account stay as they were.
+export const removeTeacherAccess = asyncHandler(async (req, res) => {
+  const u = await findTeacher(req.params.id);
+  if (u.role === 'teacher') throw new HttpError(400, 'This teacher only has a teacher login. Deactivate the account instead.');
+  u.isTeacher = false;
+  await u.save();
+  await setCourseList(u._id, []);
+  res.json({ message: 'Teacher access removed' });
+});
+
+// Batches of the courses a teacher teaches (the admin sees all), for taking class attendance.
+export const myBatches = asyncHandler(async (req, res) => {
+  const courses = await Course.find(isAdmin(req.user) ? {} : { instructors: req.user._id }).select('_id').lean();
+  const filter = { courseId: { $in: courses.map((c) => c._id) } };
+  if (req.query.isActive === 'true' || req.query.isActive === 'false') filter.isActive = req.query.isActive === 'true';
+  const items = await Batch.find(filter).sort({ createdAt: -1 }).lean();
   res.json({ items });
 });

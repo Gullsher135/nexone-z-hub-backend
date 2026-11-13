@@ -3,9 +3,9 @@ import bcrypt from 'bcryptjs';
 import { DATE_RE, TIME_RE } from '../utils/time.js';
 import { nextSeq } from './Counter.js';
 
-export const ROLES = ['admin', 'employee', 'intern', 'student'];
+export const ROLES = ['admin', 'employee', 'intern', 'student', 'teacher'];
 export const STAFF_ROLES = ['employee', 'intern']; // roles tracked with entry/exit time
-const PREFIX = { admin: 'ADM', employee: 'EMP', intern: 'INT', student: 'STD' };
+const PREFIX = { admin: 'ADM', employee: 'EMP', intern: 'INT', student: 'STD', teacher: 'TCH' };
 
 const dateField = { type: String, match: DATE_RE };
 const timeField = (def) => ({ type: String, match: TIME_RE, default: def });
@@ -21,6 +21,10 @@ const userSchema = new mongoose.Schema(
     password: { type: String, select: false },
     mustChangePassword: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true, index: true },
+
+    // An employee or intern who also teaches keeps their own login and gets the teacher portal on top.
+    // (People who are only teachers have role 'teacher' instead.)
+    isTeacher: { type: Boolean, default: false },
 
     // staff (employee / intern / admin)
     designation: { type: String, trim: true },

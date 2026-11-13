@@ -3,7 +3,7 @@ import { Batch } from '../models/Batch.js';
 import { Attendance } from '../models/Attendance.js';
 import { StudentAttendance } from '../models/StudentAttendance.js';
 import { Leave } from '../models/Leave.js';
-import { Enrollment, Submission, QuizAttempt } from '../models/lms.js';
+import { Enrollment, Submission, QuizAttempt, Course } from '../models/lms.js';
 import { FeeAccount, Payment, SalaryProfile, Payslip } from '../models/pay.js';
 import { Task } from '../models/crew.js';
 import { detachUser } from './flow.controller.js';
@@ -60,7 +60,7 @@ export const getUser = asyncHandler(async (req, res) => {
 
 export const createUser = asyncHandler(async (req, res) => {
   const { role } = req.body || {};
-  if (!ROLES.includes(role)) throw new HttpError(400, 'Role must be admin, employee, intern or student');
+  if (!ROLES.includes(role)) throw new HttpError(400, 'Role must be admin, employee, intern, student or teacher');
   if (!req.body.name) throw new HttpError(400, 'Name is required');
 
   const data = pick(req.body, EDITABLE);
@@ -69,7 +69,7 @@ export const createUser = asyncHandler(async (req, res) => {
 
   let tempPassword;
   if (isStaffLogin(role)) {
-    if (!data.email) throw new HttpError(400, 'Email is required for employees, interns and admins');
+    if (!data.email) throw new HttpError(400, 'Email is required for employees, interns, teachers and admins');
     tempPassword = req.body.password || randomPassword();
     if (tempPassword.length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
     data.password = tempPassword;
@@ -180,6 +180,7 @@ export const deleteUser = asyncHandler(async (req, res) => {
     Task.deleteMany({ assignee: user._id }),
     detachUser(user._id),
     Letter.deleteMany({ user: user._id }),
+    Course.updateMany({ instructors: user._id }, { $pull: { instructors: user._id } }),
   ]);
   await user.deleteOne();
   res.json({ message: 'Deleted' });

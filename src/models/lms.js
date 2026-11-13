@@ -41,6 +41,7 @@ const enrollmentSchema = new Schema(
   {
     course: ref('Course', { required: true, index: true }),
     student: ref('User', { required: true, index: true }),
+    batch: ref('Batch'), // the batch (of this course) the student attends
     completedLessons: [Schema.Types.ObjectId],
     lastLesson: Schema.Types.ObjectId,
     completedAt: Date,

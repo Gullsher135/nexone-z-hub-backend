@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
-import { protect, adminOnly, staffOnly, requireRole } from '../middleware/auth.js';
+import { protect, adminOnly, staffOnly, requireRole, teachRoles } from '../middleware/auth.js';
 import * as auth from '../controllers/auth.controller.js';
 import * as users from '../controllers/users.controller.js';
 import * as batches from '../controllers/batches.controller.js';
@@ -71,9 +71,9 @@ router.post('/attendance/manual', protect, adminOnly, attendance.manualEntry);
 router.delete('/attendance/:id', protect, adminOnly, attendance.deleteRecord);
 
 // ---- student attendance ----
-router.get('/student-attendance', protect, adminOnly, students.getSheet);
-router.put('/student-attendance', protect, adminOnly, students.saveSheet);
-router.get('/student-attendance/summary', protect, adminOnly, students.batchSummary);
+router.get('/student-attendance', protect, teachRoles, students.getSheet);
+router.put('/student-attendance', protect, teachRoles, students.saveSheet);
+router.get('/student-attendance/summary', protect, teachRoles, students.batchSummary);
 router.get('/student-attendance/student/:id', protect, adminOnly, students.studentHistory);
 
 // ---- leaves ----
@@ -91,38 +91,51 @@ router.get('/reports/export', protect, adminOnly, reports.exportCsv);
 
 // ---- NexoneZ Learn (LMS) ----
 router.get('/lms/verify/:code', syncLimiter, lms.verifyCertificate);
-router.get('/lms/overview', protect, requireRole('admin', 'employee', 'intern'), lms.adminOverview);
+router.get('/lms/overview', protect, teachRoles, lms.adminOverview);
 router.get('/lms/my/overview', protect, requireRole('student'), lms.myOverview);
-router.get('/lms/pool', protect, requireRole('admin', 'employee', 'intern'), lms.studentPool);
+router.get('/lms/pool', protect, teachRoles, lms.studentPool);
 router.get('/lms/staff', protect, adminOnly, lms.staffPool);
+router.get('/lms/teachers', protect, adminOnly, lms.listTeachers);
+router.post('/lms/teachers', protect, adminOnly, lms.createTeacher);
+router.put('/lms/teachers/:id/courses', protect, adminOnly, lms.setTeacherCourses);
+router.delete('/lms/teachers/:id', protect, adminOnly, lms.removeTeacherAccess);
+router.get('/lms/my/batches', protect, teachRoles, lms.myBatches);
 router.get('/lms/courses', protect, lms.listCourses);
 router.post('/lms/courses', protect, adminOnly, lms.createCourse);
 router.get('/lms/courses/:id', protect, lms.getCourse);
-router.patch('/lms/courses/:id', protect, requireRole('admin', 'employee', 'intern'), lms.updateCourse);
+router.patch('/lms/courses/:id', protect, teachRoles, lms.updateCourse);
 router.delete('/lms/courses/:id', protect, adminOnly, lms.deleteCourse);
-router.put('/lms/courses/:id/curriculum', protect, requireRole('admin', 'employee', 'intern'), lms.saveCurriculum);
-router.get('/lms/courses/:id/students', protect, requireRole('admin', 'employee', 'intern'), lms.listStudents);
-router.post('/lms/courses/:id/enroll', protect, requireRole('admin', 'employee', 'intern'), lms.enroll);
-router.delete('/lms/courses/:id/enroll/:studentId', protect, requireRole('admin', 'employee', 'intern'), lms.unenroll);
-router.post('/lms/courses/:id/enroll/:studentId/certificate', protect, requireRole('admin', 'employee', 'intern'), lms.issueManual);
+router.put('/lms/courses/:id/curriculum', protect, teachRoles, lms.saveCurriculum);
+router.get('/lms/courses/:id/students', protect, teachRoles, lms.listStudents);
+router.get('/lms/courses/:id/students/:studentId/progress', protect, teachRoles, lms.studentProgress);
+router.get('/lms/courses/:id/my-progress', protect, requireRole('student'), lms.myProgress);
+router.get('/lms/courses/:id/batches', protect, teachRoles, lms.listCourseBatches);
+router.post('/lms/courses/:id/batches', protect, teachRoles, lms.createCourseBatch);
+router.post('/lms/courses/:id/batches/link', protect, teachRoles, lms.linkCourseBatch);
+router.patch('/lms/courses/:id/batches/:batchId', protect, teachRoles, lms.updateCourseBatch);
+router.delete('/lms/courses/:id/batches/:batchId', protect, teachRoles, lms.deleteCourseBatch);
+router.post('/lms/courses/:id/batches/:batchId/students', protect, teachRoles, lms.addStudentsToBatch);
+router.post('/lms/courses/:id/enroll', protect, teachRoles, lms.enroll);
+router.delete('/lms/courses/:id/enroll/:studentId', protect, teachRoles, lms.unenroll);
+router.post('/lms/courses/:id/enroll/:studentId/certificate', protect, adminOnly, lms.issueManual);
 router.post('/lms/courses/:id/progress', protect, requireRole('student'), lms.setProgress);
 router.get('/lms/courses/:id/assignments', protect, lms.listAssignments);
-router.post('/lms/courses/:id/assignments', protect, requireRole('admin', 'employee', 'intern'), lms.createAssignment);
-router.patch('/lms/assignments/:id', protect, requireRole('admin', 'employee', 'intern'), lms.updateAssignment);
-router.delete('/lms/assignments/:id', protect, requireRole('admin', 'employee', 'intern'), lms.deleteAssignment);
+router.post('/lms/courses/:id/assignments', protect, teachRoles, lms.createAssignment);
+router.patch('/lms/assignments/:id', protect, teachRoles, lms.updateAssignment);
+router.delete('/lms/assignments/:id', protect, teachRoles, lms.deleteAssignment);
 router.post('/lms/assignments/:id/submit', protect, requireRole('student'), lms.submitAssignment);
-router.get('/lms/assignments/:id/submissions', protect, requireRole('admin', 'employee', 'intern'), lms.listSubmissions);
-router.patch('/lms/submissions/:id/grade', protect, requireRole('admin', 'employee', 'intern'), lms.gradeSubmission);
+router.get('/lms/assignments/:id/submissions', protect, teachRoles, lms.listSubmissions);
+router.patch('/lms/submissions/:id/grade', protect, teachRoles, lms.gradeSubmission);
 router.get('/lms/courses/:id/quizzes', protect, lms.listQuizzes);
-router.post('/lms/courses/:id/quizzes', protect, requireRole('admin', 'employee', 'intern'), lms.createQuiz);
+router.post('/lms/courses/:id/quizzes', protect, teachRoles, lms.createQuiz);
 router.get('/lms/quizzes/:id', protect, lms.getQuiz);
-router.patch('/lms/quizzes/:id', protect, requireRole('admin', 'employee', 'intern'), lms.updateQuiz);
-router.delete('/lms/quizzes/:id', protect, requireRole('admin', 'employee', 'intern'), lms.deleteQuiz);
+router.patch('/lms/quizzes/:id', protect, teachRoles, lms.updateQuiz);
+router.delete('/lms/quizzes/:id', protect, teachRoles, lms.deleteQuiz);
 router.post('/lms/quizzes/:id/attempt', protect, requireRole('student'), lms.attemptQuiz);
-router.get('/lms/quizzes/:id/attempts', protect, requireRole('admin', 'employee', 'intern'), lms.listAttempts);
+router.get('/lms/quizzes/:id/attempts', protect, teachRoles, lms.listAttempts);
 router.get('/lms/courses/:id/announcements', protect, lms.listAnnouncements);
-router.post('/lms/courses/:id/announcements', protect, requireRole('admin', 'employee', 'intern'), lms.createAnnouncement);
-router.delete('/lms/announcements/:id', protect, requireRole('admin', 'employee', 'intern'), lms.deleteAnnouncement);
+router.post('/lms/courses/:id/announcements', protect, teachRoles, lms.createAnnouncement);
+router.delete('/lms/announcements/:id', protect, teachRoles, lms.deleteAnnouncement);
 
 // ---- NexoneZ Crew (employee portal) ----
 const crewUser = requireRole('admin', 'employee', 'intern');
