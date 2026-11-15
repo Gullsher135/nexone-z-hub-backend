@@ -9,6 +9,7 @@ const feeAccountSchema = new Schema(
   {
     student: ref('User', { required: true, unique: true }),
     courseFee: { type: Number, required: true, min: 0 },
+    admissionFee: { type: Number, default: 0, min: 0 }, // one-time fee on top of the course fee (old plans keep 0)
     discount: { type: Number, default: 0, min: 0 },
     installments: [{ label: { type: String, trim: true, maxlength: 60 }, dueDate: { type: String, match: DATE_RE, required: true }, amount: { type: Number, required: true, min: 1 } }],
     note: { type: String, trim: true, maxlength: 500 },

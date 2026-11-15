@@ -15,6 +15,10 @@ export const WEIGHTS = { attendance: 1, assignments: 1, quizzes: 1 };
 export const WEAK_BELOW = 60; // a part under this percentage is flagged as a weak area
 
 const sid = (v) => String(v?._id || v);
+// An assignment or quiz with no batches is for the whole course; otherwise only for the listed batches.
+export const visibleForBatch = (item, batchId) =>
+  !item.batches?.length || (!!batchId && item.batches.some((b) => sid(b) === sid(batchId)));
+
 const pct = (num, den) => (den > 0 ? Math.min(100, Math.round((num / den) * 100)) : null);
 
 function attendancePart(records) {
@@ -125,9 +129,9 @@ export async function computeProgress(items) {
 
   const batchIds = [...new Set(items.map((i) => batchOf(i.enrollment, i.student)).filter(Boolean).map(sid))];
   const [assignments, submissions, quizzes, attempts, batches] = await Promise.all([
-    Assignment.find({ course: { $in: courseIds } }).select('course title dueDate maxPoints').lean(),
+    Assignment.find({ course: { $in: courseIds } }).select('course title dueDate maxPoints batches').lean(),
     Submission.find({ course: { $in: courseIds }, student: { $in: studentIds } }).select('assignment course student grade gradedAt late').lean(),
-    Quiz.find({ course: { $in: courseIds }, published: true }).select('course title questions.points').lean(),
+    Quiz.find({ course: { $in: courseIds }, published: true }).select('course title questions.points batches').lean(),
     QuizAttempt.find({ course: { $in: courseIds }, student: { $in: studentIds } }).select('quiz course student score').lean(),
     batchIds.length ? Batch.find({ _id: { $in: batchIds } }).select('courseId').lean() : [],
   ]);
@@ -142,12 +146,13 @@ export async function computeProgress(items) {
     const b = batchOf(enrollment, student);
     // use the batch only when it is free or belongs to this very course
     const bOk = b && (!batchCourse.get(sid(b)) || batchCourse.get(sid(b)) === cid);
+    const eb = bOk ? sid(b) : null; // only work meant for this student's batch counts towards their progress
     out.set(`${cid}:${stid}`, buildProgress({
       today,
       attendance: bOk ? marks.filter((m) => sid(m.student) === stid && sid(m.batch) === sid(b)) : [],
-      assignments: assignments.filter((a) => sid(a.course) === cid),
+      assignments: assignments.filter((a) => sid(a.course) === cid && visibleForBatch(a, eb)),
       submissions: submissions.filter((s) => sid(s.course) === cid && sid(s.student) === stid),
-      quizzes: quizzes.filter((q) => sid(q.course) === cid),
+      quizzes: quizzes.filter((q) => sid(q.course) === cid && visibleForBatch(q, eb)),
       attempts: attempts.filter((a) => sid(a.course) === cid && sid(a.student) === stid),
     }));
   }

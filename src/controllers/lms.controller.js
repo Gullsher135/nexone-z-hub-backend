@@ -4,7 +4,7 @@ import mongoose from 'mongoose';
 import { User, STAFF_ROLES } from '../models/User.js';
 import { Batch } from '../models/Batch.js';
 import { StudentAttendance } from '../models/StudentAttendance.js';
-import { computeProgress, progressKey } from '../utils/progress.js';
+import { computeProgress, progressKey, visibleForBatch } from '../utils/progress.js';
 import { nextSeq } from '../models/Counter.js';
 import { HttpError, asyncHandler, pick, randomPassword } from '../utils/helpers.js';
 import { dateKey, DATE_RE } from '../utils/time.js';
@@ -42,6 +42,33 @@ async function access(req, id = req.params.id) {
     throw new HttpError(403, 'You do not teach this course');
   }
   return { course, manage, enrollment };
+}
+
+// The batch a student sits in for this course: their own enrolment first, then their general batch.
+// A batch that belongs to another course is ignored.
+async function batchFor(course, enrollment, user) {
+  const bid = enrollment?.batch || user.batch;
+  if (!bid) return null;
+  if (enrollment?.batch) return sid(bid);
+  const b = await Batch.findById(bid).select('courseId').lean();
+  return b && (!b.courseId || sid(b.courseId) === sid(course._id)) ? sid(bid) : null;
+}
+
+// Which batches an assignment or quiz is for. An empty list means every batch of the course.
+async function cleanBatches(course, raw) {
+  const ids = [...new Set((Array.isArray(raw) ? raw : []).map(String))];
+  if (!ids.length) return [];
+  if (ids.some((i) => !mongoose.isValidObjectId(i))) throw new HttpError(400, 'Invalid batch');
+  const found = await Batch.find({ _id: { $in: ids }, courseId: course._id }).select('_id').lean();
+  if (found.length !== ids.length) throw new HttpError(400, 'Choose batches of this course only');
+  return ids;
+}
+
+// Adds batchNames (for the teacher screens) to a list of assignments or quizzes.
+async function withBatchNames(items) {
+  const ids = [...new Set(items.flatMap((i) => (i.batches || []).map(sid)))];
+  const names = new Map((ids.length ? await Batch.find({ _id: { $in: ids } }).select('name').lean() : []).map((b) => [sid(b._id), b.name]));
+  return items.map((i) => ({ ...i, batchNames: (i.batches || []).map((b) => names.get(sid(b))).filter(Boolean) }));
 }
 
 // ----- courses -----
@@ -254,9 +281,14 @@ export const verifyCertificate = asyncHandler(async (req, res) => {
 
 // ----- assignments -----
 export const listAssignments = asyncHandler(async (req, res) => {
-  const { course, manage } = await access(req);
-  const items = await Assignment.find({ course: course._id }).sort({ dueDate: 1, createdAt: -1 }).lean();
+  const { course, manage, enrollment } = await access(req);
+  let items = await Assignment.find({ course: course._id }).sort({ dueDate: 1, createdAt: -1 }).lean();
+  if (!manage) {
+    const eb = await batchFor(course, enrollment, req.user);
+    items = items.filter((a) => visibleForBatch(a, eb));
+  }
   if (manage) {
+    items = await withBatchNames(items);
     const counts = await Submission.aggregate([{ $match: { course: course._id } }, { $group: { _id: '$assignment', n: { $sum: 1 }, graded: { $sum: { $cond: [{ $ifNull: ['$gradedAt', false] }, 1, 0] } } } }]);
     const m = new Map(counts.map((c) => [sid(c._id), c]));
     return res.json({ items: items.map((a) => ({ ...a, submissions: m.get(sid(a._id))?.n || 0, graded: m.get(sid(a._id))?.graded || 0 })) });
@@ -276,7 +308,8 @@ export const createAssignment = asyncHandler(async (req, res) => {
   if (!req.body?.title) throw new HttpError(400, 'Title is required');
   const data = pick(req.body, ASSIGN_FIELDS);
   checkAssign(data);
-  const a = await Assignment.create({ ...data, course: course._id, createdBy: req.user._id });
+  const batches = await cleanBatches(course, req.body.batches);
+  const a = await Assignment.create({ ...data, batches, course: course._id, createdBy: req.user._id });
   res.status(201).json({ assignment: a });
 });
 
@@ -288,10 +321,11 @@ async function ownAssignment(req) {
 }
 
 export const updateAssignment = asyncHandler(async (req, res) => {
-  const { a, manage } = await ownAssignment(req);
+  const { a, manage, course } = await ownAssignment(req);
   if (!manage) throw new HttpError(403, 'Not allowed');
   const data = pick(req.body, ASSIGN_FIELDS);
   checkAssign(data);
+  if (req.body.batches !== undefined) a.batches = await cleanBatches(course, req.body.batches);
   Object.assign(a, data);
   await a.save();
   res.json({ assignment: a });
@@ -307,7 +341,8 @@ export const deleteAssignment = asyncHandler(async (req, res) => {
 
 export const submitAssignment = asyncHandler(async (req, res) => {
   if (!isStudent(req.user)) throw new HttpError(403, 'Only students submit work');
-  const { a } = await ownAssignment(req);
+  const { a, course, enrollment } = await ownAssignment(req);
+  if (!visibleForBatch(a, await batchFor(course, enrollment, req.user))) throw new HttpError(403, 'This assignment is not for your batch');
   const text = String(req.body?.text || '').trim();
   const link = String(req.body?.link || '').trim();
   if (!text && !link) throw new HttpError(400, 'Write your answer or add a link');
@@ -358,15 +393,21 @@ function cleanQuestions(list) {
 }
 
 export const listQuizzes = asyncHandler(async (req, res) => {
-  const { course, manage } = await access(req);
-  const quizzes = await Quiz.find(manage ? { course: course._id } : { course: course._id, published: true }).sort({ createdAt: -1 }).lean();
+  const { course, manage, enrollment } = await access(req);
+  let quizzes = await Quiz.find(manage ? { course: course._id } : { course: course._id, published: true }).sort({ createdAt: -1 }).lean();
+  if (!manage) {
+    const eb = await batchFor(course, enrollment, req.user);
+    quizzes = quizzes.filter((q) => visibleForBatch(q, eb));
+  } else {
+    quizzes = await withBatchNames(quizzes);
+  }
   const attempts = await QuizAttempt.find(manage ? { course: course._id } : { course: course._id, student: req.user._id }).lean();
   const by = new Map();
   attempts.forEach((a) => by.set(sid(a.quiz), [...(by.get(sid(a.quiz)) || []), a]));
   res.json({
     items: quizzes.map((q) => {
       const at = by.get(sid(q._id)) || [];
-      const base = { _id: q._id, title: q.title, description: q.description, maxAttempts: q.maxAttempts, published: q.published, questionCount: q.questions.length, totalPoints: q.questions.reduce((s, x) => s + x.points, 0) };
+      const base = { _id: q._id, title: q.title, description: q.description, maxAttempts: q.maxAttempts, published: q.published, batches: q.batches, batchNames: q.batchNames, questionCount: q.questions.length, totalPoints: q.questions.reduce((s, x) => s + x.points, 0) };
       if (manage) return { ...base, attempts: at.length };
       const best = at.reduce((m, a) => Math.max(m, a.score), 0);
       return { ...base, attemptsUsed: at.length, best: at.length ? best : null, maxScore: base.totalPoints };
@@ -377,7 +418,8 @@ export const listQuizzes = asyncHandler(async (req, res) => {
 export const createQuiz = asyncHandler(async (req, res) => {
   const { course } = await access(req);
   if (!req.body?.title) throw new HttpError(400, 'Title is required');
-  const quiz = await Quiz.create({ course: course._id, title: req.body.title, description: req.body.description, maxAttempts: req.body.maxAttempts ?? 1, published: req.body.published !== false, questions: cleanQuestions(req.body.questions), createdBy: req.user._id });
+  const batches = await cleanBatches(course, req.body.batches);
+  const quiz = await Quiz.create({ batches, course: course._id, title: req.body.title, description: req.body.description, maxAttempts: req.body.maxAttempts ?? 1, published: req.body.published !== false, questions: cleanQuestions(req.body.questions), createdBy: req.user._id });
   res.status(201).json({ quiz });
 });
 
@@ -389,17 +431,18 @@ async function ownQuiz(req) {
 }
 
 export const getQuiz = asyncHandler(async (req, res) => {
-  const { quiz, manage } = await ownQuiz(req);
+  const { quiz, manage, course, enrollment } = await ownQuiz(req);
   if (manage) return res.json({ quiz });
-  if (!quiz.published) throw new HttpError(404, 'Quiz not found');
+  if (!quiz.published || !visibleForBatch(quiz, await batchFor(course, enrollment, req.user))) throw new HttpError(404, 'Quiz not found');
   const mine = await QuizAttempt.find({ quiz: quiz._id, student: req.user._id }).sort({ submittedAt: -1 }).lean();
   res.json({ quiz: stripAnswers(quiz.toObject()), attempts: mine.map((a) => ({ _id: a._id, score: a.score, maxScore: a.maxScore, submittedAt: a.submittedAt })) });
 });
 
 export const updateQuiz = asyncHandler(async (req, res) => {
-  const { quiz, manage } = await ownQuiz(req);
+  const { quiz, manage, course } = await ownQuiz(req);
   if (!manage) throw new HttpError(403, 'Not allowed');
   Object.assign(quiz, pick(req.body, ['title', 'description', 'maxAttempts', 'published']));
+  if (req.body.batches !== undefined) quiz.batches = await cleanBatches(course, req.body.batches);
   if (req.body.questions) quiz.questions = cleanQuestions(req.body.questions);
   await quiz.save();
   res.json({ quiz });
@@ -415,8 +458,8 @@ export const deleteQuiz = asyncHandler(async (req, res) => {
 
 export const attemptQuiz = asyncHandler(async (req, res) => {
   if (!isStudent(req.user)) throw new HttpError(403, 'Only students take quizzes');
-  const { quiz } = await ownQuiz(req);
-  if (!quiz.published) throw new HttpError(404, 'Quiz not found');
+  const { quiz, course, enrollment } = await ownQuiz(req);
+  if (!quiz.published || !visibleForBatch(quiz, await batchFor(course, enrollment, req.user))) throw new HttpError(404, 'Quiz not found');
   const used = await QuizAttempt.countDocuments({ quiz: quiz._id, student: req.user._id });
   if (quiz.maxAttempts && used >= quiz.maxAttempts) throw new HttpError(409, 'You have used all attempts for this quiz');
   const answers = Array.isArray(req.body?.answers) ? req.body.answers.map(Number) : [];
@@ -475,8 +518,9 @@ export const myOverview = asyncHandler(async (req, res) => {
   ]);
   const done = new Set(subs.map((s) => sid(s.assignment)));
   const today = dateKey();
+  const myBatch = new Map(await Promise.all(live.map(async (e) => [sid(e.course._id), await batchFor(e.course, e, req.user)])));
   const pending = assignments
-    .filter((a) => !done.has(sid(a._id)))
+    .filter((a) => !done.has(sid(a._id)) && visibleForBatch(a, myBatch.get(sid(a.course))))
     .map((a) => ({ _id: a._id, course: a.course, title: a.title, dueDate: a.dueDate, overdue: !!a.dueDate && a.dueDate < today, courseTitle: live.find((e) => sid(e.course._id) === sid(a.course))?.course.title }))
     .sort((x, y) => (x.dueDate || '9999').localeCompare(y.dueDate || '9999'));
   const prog = await computeProgress(live.map((e) => ({ course: e.course, enrollment: e, student: req.user })));
@@ -611,11 +655,13 @@ export const deleteCourseBatch = asyncHandler(async (req, res) => {
   const course = await manageCourse(req);
   const batch = await Batch.findOne({ _id: req.params.batchId, courseId: course._id });
   if (!batch) throw new HttpError(404, 'Batch not found in this course');
-  const [e, u, a] = await Promise.all([
+  const [e, u, a, w] = await Promise.all([
     Enrollment.exists({ batch: batch._id }),
     User.exists({ batch: batch._id }),
     StudentAttendance.exists({ batch: batch._id }),
+    Promise.all([Assignment.exists({ batches: batch._id }), Quiz.exists({ batches: batch._id })]).then((r) => r.some(Boolean)),
   ]);
+  if (w) throw new HttpError(409, 'Assignments or quizzes are set for this batch. Change them first, or mark the batch as finished instead.');
   if (e || u || a) throw new HttpError(409, 'This batch has students or attendance. Mark it as finished instead.');
   await batch.deleteOne();
   res.json({ message: 'Deleted' });

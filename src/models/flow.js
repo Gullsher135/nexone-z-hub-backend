@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { DATE_RE } from '../utils/time.js';
+import { ITEM_TYPES, PRIORITIES, LINK_KINDS } from '../utils/flowCalc.js';
 
 const { Schema } = mongoose;
 const ref = (name, extra = {}) => ({ type: Schema.Types.ObjectId, ref: name, ...extra });
@@ -32,9 +33,16 @@ const projectSchema = new Schema(
     lead: ref('User'),
     members: [ref('User')],
     createdBy: ref('User'),
+    // phases of the project; cards can be attached to one
+    milestones: [{ name: { type: String, required: true, trim: true, maxlength: 100 }, description: { type: String, maxlength: 500 }, dueDate: { type: String, match: DATE_RE }, doneAt: Date }],
+    // repo, design files, documents, staging and live links
+    links: [{ title: { type: String, trim: true, maxlength: 80 }, url: { type: String, required: true, maxlength: 500 }, kind: { type: String, enum: LINK_KINDS, default: 'other' } }],
+    // read-only progress page for the client
+    share: { token: String, enabled: { type: Boolean, default: false }, showTasks: { type: Boolean, default: false } },
   },
   { timestamps: true }
 );
+projectSchema.index({ 'share.token': 1 }, { unique: true, sparse: true });
 
 // A card on a project's board.
 const itemSchema = new Schema(
@@ -43,7 +51,18 @@ const itemSchema = new Schema(
     title: { type: String, required: true, trim: true, maxlength: 160 },
     description: { type: String, maxlength: 4000 },
     assignee: ref('User', { index: true }),
-    priority: { type: String, enum: ['low', 'medium', 'high'], default: 'medium' },
+    priority: { type: String, enum: PRIORITIES, default: 'medium' },
+    type: { type: String, enum: ITEM_TYPES, default: 'task' },
+    labels: [{ type: String, trim: true, maxlength: 24 }],
+    startDate: { type: String, match: DATE_RE },
+    estimateHours: { type: Number, min: 0, max: 1000 },
+    loggedHours: { type: Number, min: 0, default: 0 },
+    timeLogs: [{ user: ref('User'), hours: { type: Number, min: 0, max: 24 }, note: { type: String, maxlength: 200 }, date: { type: String, match: DATE_RE }, at: { type: Date, default: Date.now } }],
+    checklist: [{ text: { type: String, maxlength: 140 }, done: { type: Boolean, default: false } }],
+    links: [{ title: { type: String, maxlength: 80 }, url: { type: String, required: true, maxlength: 500 } }],
+    milestone: Schema.Types.ObjectId, // _id of one of the project's milestones
+    blockedBy: [ref('WorkItem')], // cards that must be finished first
+    activity: [{ user: ref('User'), text: { type: String, maxlength: 200 }, at: { type: Date, default: Date.now } }],
     status: { type: String, enum: ITEM_STATUS, default: 'todo', index: true },
     dueDate: { type: String, match: DATE_RE },
     completedAt: Date,

@@ -13,7 +13,7 @@ const METHODS = ['cash', 'bank', 'jazzcash', 'easypaisa', 'other'];
 
 // ===================== fees =====================
 function summarize(acc, payments, today = dateKey()) {
-  const total = Math.max(0, acc.courseFee - (acc.discount || 0));
+  const total = Math.max(0, (acc.admissionFee || 0) + acc.courseFee - (acc.discount || 0));
   const paid = payments.reduce((s, p) => s + p.amount, 0);
   const balance = Math.max(0, total - paid);
   const dueSoFar = acc.installments.filter((i) => i.dueDate <= today).reduce((s, i) => s + i.amount, 0);
@@ -65,15 +65,33 @@ export const setPlan = asyncHandler(async (req, res) => {
   const student = await User.findOne({ _id: req.params.studentId, role: 'student' });
   if (!student) throw new HttpError(404, 'Student not found');
   const courseFee = money(req.body.courseFee);
+  const admissionFee = money(req.body.admissionFee);
   const discount = money(req.body.discount);
   if (courseFee <= 0) throw new HttpError(400, 'Enter the course fee');
-  if (discount < 0 || discount > courseFee) throw new HttpError(400, 'Discount cannot be more than the fee');
+  if (admissionFee < 0) throw new HttpError(400, 'Admission fee cannot be negative');
+  if (discount < 0 || discount > courseFee + admissionFee) throw new HttpError(400, 'Discount cannot be more than the fee');
   const installments = (req.body.installments || []).map((i) => ({ label: i.label, dueDate: i.dueDate, amount: money(i.amount) }));
   if (installments.some((i) => !DATE_RE.test(i.dueDate || '') || i.amount <= 0)) throw new HttpError(400, 'Every installment needs a due date and amount');
-  const total = courseFee - discount;
+  const total = admissionFee + courseFee - discount;
+  // The schedule includes the advance as its first row, so it always adds up to the full total.
   if (installments.length && installments.reduce((s, i) => s + i.amount, 0) !== total) throw new HttpError(400, `Installments must add up to the total fee (Rs ${total})`);
-  const acc = await FeeAccount.findOneAndUpdate({ student: student._id }, { courseFee, discount, installments, note: req.body.note }, { upsert: true, new: true, setDefaultsOnInsert: true });
-  res.json({ account: acc });
+
+  // Advance received at admission: only when the plan is first created. It is saved as a real payment with a receipt.
+  const hadPlan = await FeeAccount.exists({ student: student._id });
+  const advance = money(req.body.advance?.amount);
+  const advDate = req.body.advance?.date || dateKey();
+  if (!hadPlan && advance > 0) {
+    if (advance > total) throw new HttpError(400, 'Advance cannot be more than the total fee');
+    if (!DATE_RE.test(advDate)) throw new HttpError(400, 'Advance date must be YYYY-MM-DD');
+  }
+  const acc = await FeeAccount.findOneAndUpdate({ student: student._id }, { courseFee, admissionFee, discount, installments, note: req.body.note }, { upsert: true, new: true, setDefaultsOnInsert: true });
+  let payment = null;
+  if (!hadPlan && advance > 0) {
+    const n = await nextSeq('receipt');
+    const method = METHODS.includes(req.body.advance?.method) ? req.body.advance.method : 'cash';
+    payment = await Payment.create({ receiptNo: `RCPT-${String(n).padStart(5, '0')}`, student: student._id, amount: advance, date: advDate, method, reference: req.body.advance?.reference, note: 'Advance', receivedBy: req.user._id });
+  }
+  res.json({ account: acc, payment });
 });
 
 export const addPayment = asyncHandler(async (req, res) => {
@@ -87,7 +105,7 @@ export const addPayment = asyncHandler(async (req, res) => {
   if (!DATE_RE.test(date)) throw new HttpError(400, 'Date must be YYYY-MM-DD');
   const method = METHODS.includes(req.body.method) ? req.body.method : 'cash';
   const paid = (await Payment.find({ student: student._id }).select('amount').lean()).reduce((s, p) => s + p.amount, 0);
-  const balance = acc.courseFee - (acc.discount || 0) - paid;
+  const balance = (acc.admissionFee || 0) + acc.courseFee - (acc.discount || 0) - paid;
   if (amount > balance) throw new HttpError(400, `Only Rs ${balance} is outstanding for this student`);
   const n = await nextSeq('receipt');
   const p = await Payment.create({ receiptNo: `RCPT-${String(n).padStart(5, '0')}`, student: student._id, amount, date, method, reference: req.body.reference, note: req.body.note, receivedBy: req.user._id });

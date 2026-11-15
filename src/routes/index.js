@@ -204,5 +204,14 @@ router.patch('/flow/items/:id', protect, crewUser, flow.updateItem);
 router.delete('/flow/items/:id', protect, crewUser, flow.deleteItem);
 router.post('/flow/items/:id/status', protect, crewUser, flow.setItemStatus);
 router.post('/flow/items/:id/comments', protect, crewUser, flow.commentItem);
+router.post('/flow/items/:id/time', protect, crewUser, flow.logTime);
+router.delete('/flow/items/:id/time/:logId', protect, crewUser, flow.deleteTime);
+router.get('/flow/reminders', protect, crewUser, flow.reminders);
+router.post('/flow/projects/:id/milestones', protect, crewUser, flow.createMilestone);
+router.patch('/flow/projects/:id/milestones/:mid', protect, crewUser, flow.updateMilestone);
+router.delete('/flow/projects/:id/milestones/:mid', protect, crewUser, flow.deleteMilestone);
+router.put('/flow/projects/:id/links', protect, crewUser, flow.setProjectLinks);
+router.post('/flow/projects/:id/share', protect, adminOnly, flow.setShare);
+router.get('/flow/share/:token', syncLimiter, flow.publicShare); // public: progress page for the client
 
 export default router;

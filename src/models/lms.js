@@ -61,6 +61,7 @@ const assignmentSchema = new Schema(
     dueDate: { type: String, match: DATE_RE },
     maxPoints: { type: Number, default: 100, min: 1, max: 1000 },
     allowLate: { type: Boolean, default: true },
+    batches: [ref('Batch')], // empty = every batch of the course; otherwise only these batches
     createdBy: ref('User'),
   },
   { timestamps: true }
@@ -99,6 +100,7 @@ const quizSchema = new Schema(
     description: { type: String, maxlength: 2000 },
     maxAttempts: { type: Number, default: 1, min: 0, max: 20 }, // 0 = unlimited
     published: { type: Boolean, default: true },
+    batches: [ref('Batch')], // empty = every batch of the course; otherwise only these batches
     questions: [questionSchema],
     createdBy: ref('User'),
   },
