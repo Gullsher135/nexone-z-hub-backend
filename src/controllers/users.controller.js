@@ -3,7 +3,7 @@ import { Batch } from '../models/Batch.js';
 import { Attendance } from '../models/Attendance.js';
 import { StudentAttendance } from '../models/StudentAttendance.js';
 import { Leave } from '../models/Leave.js';
-import { Enrollment, Submission, QuizAttempt, Course } from '../models/lms.js';
+import { Enrollment, Submission, QuizAttempt, Course, StoredFile } from '../models/lms.js';
 import { FeeAccount, Payment, SalaryProfile, Payslip } from '../models/pay.js';
 import { Task } from '../models/crew.js';
 import { detachUser } from './flow.controller.js';
@@ -173,6 +173,7 @@ export const deleteUser = asyncHandler(async (req, res) => {
     Enrollment.deleteMany({ student: user._id }),
     Submission.deleteMany({ student: user._id }),
     QuizAttempt.deleteMany({ student: user._id }),
+    StoredFile.deleteMany({ owner: user._id, kind: 'submission' }),
     FeeAccount.deleteMany({ student: user._id }),
     Payment.deleteMany({ student: user._id }),
     SalaryProfile.deleteMany({ user: user._id }),

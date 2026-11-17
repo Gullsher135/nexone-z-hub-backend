@@ -3,7 +3,7 @@ import { User } from '../models/User.js';
 import { Batch } from '../models/Batch.js';
 import { Course } from '../models/lms.js';
 import { HttpError, asyncHandler } from '../utils/helpers.js';
-import { DATE_RE, MONTH_RE, currentMonth, dateKey, monthRange } from '../utils/time.js';
+import { CLASS_DAYS_TEXT, DATE_RE, MONTH_RE, currentMonth, dateKey, isClassDay, lastClassDay, monthRange } from '../utils/time.js';
 
 const STATUSES = ['present', 'absent', 'late', 'leave'];
 
@@ -25,7 +25,7 @@ const studentsOf = async (batch) => {
 
 export const getSheet = asyncHandler(async (req, res) => {
   const { batch } = req.query;
-  const date = req.query.date || dateKey();
+  const date = req.query.date || lastClassDay(); // opens on the latest Saturday or Sunday
   if (!batch) throw new HttpError(400, 'batch is required');
   if (!DATE_RE.test(date)) throw new HttpError(400, 'date must be YYYY-MM-DD');
   await assertBatchAccess(req.user, batch);
@@ -38,6 +38,7 @@ export const getSheet = asyncHandler(async (req, res) => {
   res.json({
     batch: b,
     date,
+    classDay: isClassDay(date),
     marked: marks.length > 0,
     rows: students.map((s) => ({
       student: s,
@@ -52,6 +53,7 @@ export const saveSheet = asyncHandler(async (req, res) => {
   const { batch, date, records } = req.body || {};
   if (!DATE_RE.test(date || '')) throw new HttpError(400, 'A valid date is required');
   if (date > dateKey()) throw new HttpError(400, 'You cannot mark attendance for a future date');
+  if (!isClassDay(date)) throw new HttpError(400, `Classes are held on ${CLASS_DAYS_TEXT} only. Choose one of those days.`);
   if (!Array.isArray(records)) throw new HttpError(400, 'records must be an array');
   await assertBatchAccess(req.user, batch);
   const b = await Batch.findById(batch);

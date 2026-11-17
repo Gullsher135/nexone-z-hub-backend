@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { Course, Enrollment, Assignment, Submission, Quiz, QuizAttempt, Announcement } from '../models/lms.js';
+import { Course, Enrollment, Assignment, Submission, Quiz, QuizAttempt, Announcement, StoredFile } from '../models/lms.js';
 import mongoose from 'mongoose';
 import { User, STAFF_ROLES } from '../models/User.js';
 import { Batch } from '../models/Batch.js';
@@ -43,6 +43,8 @@ async function access(req, id = req.params.id) {
   }
   return { course, manage, enrollment };
 }
+
+export { access as courseAccess };
 
 // The batch a student sits in for this course: their own enrolment first, then their general batch.
 // A batch that belongs to another course is ignored.
@@ -172,7 +174,7 @@ export const deleteCourse = asyncHandler(async (req, res) => {
   const course = await Course.findById(req.params.id);
   if (!course) throw new HttpError(404, 'Course not found');
   const f = { course: course._id };
-  await Promise.all([Enrollment.deleteMany(f), Assignment.deleteMany(f), Submission.deleteMany(f), Quiz.deleteMany(f), QuizAttempt.deleteMany(f), Announcement.deleteMany(f)]);
+  await Promise.all([Enrollment.deleteMany(f), Assignment.deleteMany(f), Submission.deleteMany(f), Quiz.deleteMany(f), QuizAttempt.deleteMany(f), Announcement.deleteMany(f), StoredFile.deleteMany(f)]);
   await Batch.updateMany({ courseId: course._id }, { $unset: { courseId: '' } }).catch(() => {});
   await course.deleteOne();
   res.json({ message: 'Deleted' });
@@ -298,7 +300,42 @@ export const listAssignments = asyncHandler(async (req, res) => {
   res.json({ items: items.map((a) => ({ ...a, submission: m.get(sid(a._id)) || null })) });
 });
 
-const ASSIGN_FIELDS = ['title', 'instructions', 'dueDate', 'maxPoints', 'allowLate'];
+const ASSIGN_FIELDS = ['title', 'instructions', 'dueDate', 'maxPoints', 'allowLate', 'requireAttachment'];
+const MAX_FILES = 5;
+const MAX_LINKS = 5;
+
+// Checks the files a teacher or student wants to keep on an assignment or submission.
+// Returns the references to save, plus which uploads to mark as used and which old ones to delete.
+async function planFiles(rawIds, { course, owner, kind, existing = [] }) {
+  const ids = [...new Set((Array.isArray(rawIds) ? rawIds : []).map(String))];
+  if (ids.length > MAX_FILES) throw new HttpError(400, `You can attach up to ${MAX_FILES} files`);
+  if (ids.some((i) => !mongoose.isValidObjectId(i))) throw new HttpError(400, 'Invalid file');
+  const had = new Set(existing.map((x) => sid(x.file)));
+  const found = ids.length ? await StoredFile.find({ _id: { $in: ids }, course, kind }).select('-data').lean() : [];
+  const byId = new Map(found.map((f) => [sid(f._id), f]));
+  const refs = ids.map((id) => {
+    const f = byId.get(id);
+    const allowed = f && (had.has(id) || (sid(f.owner) === sid(owner) && !f.attached));
+    if (!allowed) throw new HttpError(400, 'A file could not be found. Please upload it again.');
+    return { file: f._id, name: f.name, size: f.size, mime: f.mime };
+  });
+  return { refs, add: ids.filter((i) => !had.has(i)), remove: [...had].filter((i) => !ids.includes(i)) };
+}
+async function applyPlan(plan) {
+  if (plan.add.length) await StoredFile.updateMany({ _id: { $in: plan.add } }, { attached: true });
+  if (plan.remove.length) await StoredFile.deleteMany({ _id: { $in: plan.remove } });
+}
+
+function cleanLinks(raw) {
+  const list = (Array.isArray(raw) ? raw : []).map((l) => String(l || '').trim()).filter(Boolean);
+  if (list.length > MAX_LINKS) throw new HttpError(400, `You can add up to ${MAX_LINKS} links`);
+  return list.map((l) => {
+    let ok = false;
+    try { ok = /^https?:$/.test(new URL(l).protocol); } catch { ok = false; }
+    if (!ok || l.length > 600) throw new HttpError(400, 'Each link must start with http:// or https://');
+    return l;
+  });
+}
 function checkAssign(d) {
   if (d.dueDate && !DATE_RE.test(d.dueDate)) throw new HttpError(400, 'Due date must be YYYY-MM-DD');
 }
@@ -309,7 +346,9 @@ export const createAssignment = asyncHandler(async (req, res) => {
   const data = pick(req.body, ASSIGN_FIELDS);
   checkAssign(data);
   const batches = await cleanBatches(course, req.body.batches);
-  const a = await Assignment.create({ ...data, batches, course: course._id, createdBy: req.user._id });
+  const plan = await planFiles(req.body.attachmentIds, { course: course._id, owner: req.user._id, kind: 'assignment' });
+  const a = await Assignment.create({ ...data, batches, attachments: plan.refs, course: course._id, createdBy: req.user._id });
+  await applyPlan(plan);
   res.status(201).json({ assignment: a });
 });
 
@@ -326,15 +365,24 @@ export const updateAssignment = asyncHandler(async (req, res) => {
   const data = pick(req.body, ASSIGN_FIELDS);
   checkAssign(data);
   if (req.body.batches !== undefined) a.batches = await cleanBatches(course, req.body.batches);
+  let plan = null;
+  if (req.body.attachmentIds !== undefined) {
+    plan = await planFiles(req.body.attachmentIds, { course: a.course, owner: req.user._id, kind: 'assignment', existing: a.attachments });
+    a.attachments = plan.refs;
+  }
   Object.assign(a, data);
   await a.save();
+  if (plan) await applyPlan(plan);
   res.json({ assignment: a });
 });
 
 export const deleteAssignment = asyncHandler(async (req, res) => {
   const { a, manage } = await ownAssignment(req);
   if (!manage) throw new HttpError(403, 'Not allowed');
+  const subs = await Submission.find({ assignment: a._id }).select('files').lean();
+  const fileIds = [...a.attachments.map((x) => x.file), ...subs.flatMap((x) => (x.files || []).map((y) => y.file))];
   await Submission.deleteMany({ assignment: a._id });
+  if (fileIds.length) await StoredFile.deleteMany({ _id: { $in: fileIds } });
   await a.deleteOne();
   res.json({ message: 'Deleted' });
 });
@@ -343,17 +391,19 @@ export const submitAssignment = asyncHandler(async (req, res) => {
   if (!isStudent(req.user)) throw new HttpError(403, 'Only students submit work');
   const { a, course, enrollment } = await ownAssignment(req);
   if (!visibleForBatch(a, await batchFor(course, enrollment, req.user))) throw new HttpError(403, 'This assignment is not for your batch');
-  const text = String(req.body?.text || '').trim();
-  const link = String(req.body?.link || '').trim();
-  if (!text && !link) throw new HttpError(400, 'Write your answer or add a link');
-  if (link && !/^https?:\/\//i.test(link)) throw new HttpError(400, 'Link must start with http:// or https://');
+  const text = String(req.body?.text || '').trim().slice(0, 10000);
+  const links = cleanLinks(req.body?.links ?? (req.body?.link ? [req.body.link] : []));
   const late = !!a.dueDate && dateKey() > a.dueDate;
   if (late && !a.allowLate) throw new HttpError(400, 'The deadline has passed');
   const existing = await Submission.findOne({ assignment: a._id, student: req.user._id });
   if (existing?.gradedAt) throw new HttpError(409, 'This submission is already graded and cannot be changed');
+  const plan = await planFiles(req.body?.fileIds, { course: a.course, owner: req.user._id, kind: 'submission', existing: existing?.files || [] });
+  if (a.requireAttachment && !plan.refs.length && !links.length) throw new HttpError(400, 'Upload your file or add a link to your work');
+  if (!text && !links.length && !plan.refs.length) throw new HttpError(400, 'Upload a file, add a link or write a note');
   const sub = existing || new Submission({ assignment: a._id, course: a.course, student: req.user._id });
-  Object.assign(sub, { text, link, late, submittedAt: new Date() });
+  Object.assign(sub, { text, links, link: links[0] || '', files: plan.refs, late, submittedAt: new Date() });
   await sub.save();
+  await applyPlan(plan);
   res.status(existing ? 200 : 201).json({ submission: sub });
 });
 
@@ -378,22 +428,77 @@ export const gradeSubmission = asyncHandler(async (req, res) => {
 });
 
 // ----- quizzes -----
-const stripAnswers = (q) => ({ ...q, questions: q.questions.map(({ correctIndex, ...rest }) => rest) });
+// Daily quiz: multiple choice / true-false, marked automatically.
+// Weekly grand quiz: sections with multiple choice, true-false, short answers and coding questions.
+// Choice questions are marked automatically; written ones are marked by the teacher.
+const isAuto = (q) => !q.type || q.type === 'mcq' || q.type === 'tf';
+const Q_TYPES = ['mcq', 'tf', 'short', 'code'];
+const GRACE_MS = 90 * 1000; // a student whose timer just ended can still hand in
+const totalOf = (quiz) => quiz.questions.reduce((s, x) => s + x.points, 0);
 
-function cleanQuestions(list) {
+// Students never get the answer key before they finish (or at all, if the teacher turned reveal off).
+const stripAnswers = (q, reveal = false) => ({
+  ...q,
+  questions: q.questions.map(({ correctIndex, modelAnswer, ...rest }) => (reveal ? { ...rest, correctIndex, modelAnswer } : rest)),
+});
+
+// An attempt whose timer ran out long ago and was never handed in is closed with zero marks.
+async function settleExpired(filter) {
+  await QuizAttempt.updateMany(
+    { ...filter, status: 'in_progress', expiresAt: { $lt: new Date(Date.now() - GRACE_MS) } },
+    { $set: { status: 'graded', score: 0, autoScore: 0, manualScore: 0, submittedAt: new Date(), comment: 'Not handed in before the time ended.' } }
+  );
+}
+
+function cleanQuestions(list, kind) {
   if (!Array.isArray(list) || !list.length) throw new HttpError(400, 'Add at least one question');
   return list.map((q, i) => {
-    const options = (q.options || []).map((o) => String(o).trim()).filter(Boolean);
-    if (!q.text?.trim()) throw new HttpError(400, `Question ${i + 1} has no text`);
-    if (options.length < 2) throw new HttpError(400, `Question ${i + 1} needs at least two options`);
-    const ci = Number(q.correctIndex);
-    if (!Number.isInteger(ci) || ci < 0 || ci >= options.length) throw new HttpError(400, `Question ${i + 1} needs a correct answer`);
-    return { ...(q._id ? { _id: q._id } : {}), text: q.text.trim(), options, correctIndex: ci, points: Number(q.points) || 1 };
+    const n = i + 1;
+    const type = Q_TYPES.includes(q.type) ? q.type : 'mcq';
+    if (kind !== 'weekly' && !isAuto({ type })) throw new HttpError(400, `Question ${n}: written and coding questions are only for a weekly grand quiz`);
+    if (!q.text?.trim()) throw new HttpError(400, `Question ${n} has no text`);
+    const points = Number(q.points) || 1;
+    if (!Number.isInteger(points) || points < 1 || points > 100) throw new HttpError(400, `Question ${n}: marks must be a whole number from 1 to 100`);
+    const base = {
+      ...(q._id ? { _id: q._id } : {}),
+      type, points,
+      section: String(q.section || '').trim().slice(0, 160),
+      text: q.text.trim(),
+      code: String(q.code || '').slice(0, 4000),
+      modelAnswer: String(q.modelAnswer || '').slice(0, 3000),
+    };
+    if (type === 'tf') {
+      const ci = Number(q.correctIndex);
+      if (ci !== 0 && ci !== 1) throw new HttpError(400, `Question ${n} needs True or False as the answer`);
+      return { ...base, options: ['True', 'False'], correctIndex: ci };
+    }
+    if (type === 'mcq') {
+      const options = (q.options || []).map((o) => String(o).trim()).filter(Boolean);
+      if (options.length < 2) throw new HttpError(400, `Question ${n} needs at least two options`);
+      const ci = Number(q.correctIndex);
+      if (!Number.isInteger(ci) || ci < 0 || ci >= options.length) throw new HttpError(400, `Question ${n} needs a correct answer`);
+      return { ...base, options, correctIndex: ci };
+    }
+    return { ...base, options: [], correctIndex: 0 }; // short / code: marked by the teacher
   });
+}
+
+function quizSettings(body) {
+  const out = {};
+  if (body.kind !== undefined) out.kind = body.kind === 'weekly' ? 'weekly' : 'daily';
+  if (body.timeLimit !== undefined) {
+    const t = Math.round(Number(body.timeLimit) || 0);
+    if (t < 0 || t > 300) throw new HttpError(400, 'Time limit must be between 0 and 300 minutes');
+    out.timeLimit = t;
+  }
+  if (body.revealAnswers !== undefined) out.revealAnswers = !!body.revealAnswers;
+  if (body.instructions !== undefined) out.instructions = String(body.instructions || '').slice(0, 3000);
+  return out;
 }
 
 export const listQuizzes = asyncHandler(async (req, res) => {
   const { course, manage, enrollment } = await access(req);
+  await settleExpired(manage ? { course: course._id } : { course: course._id, student: req.user._id });
   let quizzes = await Quiz.find(manage ? { course: course._id } : { course: course._id, published: true }).sort({ createdAt: -1 }).lean();
   if (!manage) {
     const eb = await batchFor(course, enrollment, req.user);
@@ -401,16 +506,30 @@ export const listQuizzes = asyncHandler(async (req, res) => {
   } else {
     quizzes = await withBatchNames(quizzes);
   }
-  const attempts = await QuizAttempt.find(manage ? { course: course._id } : { course: course._id, student: req.user._id }).lean();
+  const attempts = await QuizAttempt.find(manage ? { course: course._id } : { course: course._id, student: req.user._id }).select('-responses -answers').lean();
   const by = new Map();
   attempts.forEach((a) => by.set(sid(a.quiz), [...(by.get(sid(a.quiz)) || []), a]));
   res.json({
     items: quizzes.map((q) => {
       const at = by.get(sid(q._id)) || [];
-      const base = { _id: q._id, title: q.title, description: q.description, maxAttempts: q.maxAttempts, published: q.published, batches: q.batches, batchNames: q.batchNames, questionCount: q.questions.length, totalPoints: q.questions.reduce((s, x) => s + x.points, 0) };
-      if (manage) return { ...base, attempts: at.length };
-      const best = at.reduce((m, a) => Math.max(m, a.score), 0);
-      return { ...base, attemptsUsed: at.length, best: at.length ? best : null, maxScore: base.totalPoints };
+      const done = at.filter((a) => a.status !== 'in_progress');
+      const base = {
+        _id: q._id, title: q.title, description: q.description, kind: q.kind || 'daily', timeLimit: q.timeLimit || 0,
+        maxAttempts: q.maxAttempts, published: q.published, batches: q.batches, batchNames: q.batchNames,
+        questionCount: q.questions.length, totalPoints: totalOf(q),
+      };
+      if (manage) return { ...base, attempts: done.length, toMark: done.filter((a) => a.status === 'pending').length };
+      const marked = done.filter((a) => !a.status || a.status === 'graded');
+      const last = done.slice().sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt))[0];
+      return {
+        ...base,
+        attemptsUsed: at.length,
+        best: marked.length ? marked.reduce((m, a) => Math.max(m, a.score), 0) : null,
+        maxScore: base.totalPoints,
+        awaiting: done.some((a) => a.status === 'pending'),
+        inProgress: at.some((a) => a.status === 'in_progress'),
+        lastAttemptId: last?._id || null,
+      };
     }),
   });
 });
@@ -419,7 +538,12 @@ export const createQuiz = asyncHandler(async (req, res) => {
   const { course } = await access(req);
   if (!req.body?.title) throw new HttpError(400, 'Title is required');
   const batches = await cleanBatches(course, req.body.batches);
-  const quiz = await Quiz.create({ batches, course: course._id, title: req.body.title, description: req.body.description, maxAttempts: req.body.maxAttempts ?? 1, published: req.body.published !== false, questions: cleanQuestions(req.body.questions), createdBy: req.user._id });
+  const settings = quizSettings(req.body);
+  const quiz = await Quiz.create({
+    batches, ...settings, course: course._id, title: req.body.title, description: req.body.description,
+    maxAttempts: req.body.maxAttempts ?? 1, published: req.body.published !== false,
+    questions: cleanQuestions(req.body.questions, settings.kind), createdBy: req.user._id,
+  });
   res.status(201).json({ quiz });
 });
 
@@ -430,20 +554,45 @@ async function ownQuiz(req) {
   return { quiz, ...ctx };
 }
 
+const studentQuizView = (quiz, withQuestions) => {
+  const obj = quiz.toObject();
+  const view = { ...stripAnswers(obj), questionCount: obj.questions.length, totalPoints: totalOf(obj) };
+  if (!withQuestions) view.questions = []; // a timed paper stays hidden until the student presses Start
+  return view;
+};
+
 export const getQuiz = asyncHandler(async (req, res) => {
   const { quiz, manage, course, enrollment } = await ownQuiz(req);
   if (manage) return res.json({ quiz });
   if (!quiz.published || !visibleForBatch(quiz, await batchFor(course, enrollment, req.user))) throw new HttpError(404, 'Quiz not found');
-  const mine = await QuizAttempt.find({ quiz: quiz._id, student: req.user._id }).sort({ submittedAt: -1 }).lean();
-  res.json({ quiz: stripAnswers(quiz.toObject()), attempts: mine.map((a) => ({ _id: a._id, score: a.score, maxScore: a.maxScore, submittedAt: a.submittedAt })) });
+  await settleExpired({ quiz: quiz._id, student: req.user._id });
+  const mine = await QuizAttempt.find({ quiz: quiz._id, student: req.user._id }).select('-responses -answers').sort({ submittedAt: -1 }).lean();
+  const active = mine.find((a) => a.status === 'in_progress');
+  res.json({
+    quiz: studentQuizView(quiz, !quiz.timeLimit || !!active),
+    attempts: mine.filter((a) => a.status !== 'in_progress').map((a) => ({ _id: a._id, score: a.score, maxScore: a.maxScore, status: a.status || 'graded', submittedAt: a.submittedAt })),
+    active: active ? { _id: active._id, remainingMs: Math.max(0, +active.expiresAt - Date.now()) } : null,
+  });
 });
 
 export const updateQuiz = asyncHandler(async (req, res) => {
   const { quiz, manage, course } = await ownQuiz(req);
   if (!manage) throw new HttpError(403, 'Not allowed');
-  Object.assign(quiz, pick(req.body, ['title', 'description', 'maxAttempts', 'published']));
+  Object.assign(quiz, pick(req.body, ['title', 'description', 'maxAttempts', 'published']), quizSettings(req.body));
   if (req.body.batches !== undefined) quiz.batches = await cleanBatches(course, req.body.batches);
-  if (req.body.questions) quiz.questions = cleanQuestions(req.body.questions);
+  if (req.body.questions) {
+    const next = cleanQuestions(req.body.questions, quiz.kind);
+    if (await QuizAttempt.exists({ quiz: quiz._id })) {
+      // Marks already given must stay meaningful: only wording may change once students have attempted.
+      const same = next.length === quiz.questions.length && next.every((n, i) => {
+        const o = quiz.questions[i];
+        return n._id && sid(n._id) === sid(o._id) && n.type === (o.type || 'mcq') && n.points === o.points
+          && (!isAuto(n) || n.correctIndex === o.correctIndex) && n.options.length === (o.options || []).length;
+      });
+      if (!same) throw new HttpError(409, 'Students have already attempted this quiz, so questions, marks and correct answers cannot change. You can fix wording, or create a new quiz.');
+    }
+    quiz.questions = next;
+  }
   await quiz.save();
   res.json({ quiz });
 });
@@ -456,30 +605,138 @@ export const deleteQuiz = asyncHandler(async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
+// Timed quizzes: pressing Start opens the paper and starts the clock on the server.
+export const startQuiz = asyncHandler(async (req, res) => {
+  if (!isStudent(req.user)) throw new HttpError(403, 'Only students take quizzes');
+  const { quiz, course, enrollment } = await ownQuiz(req);
+  if (!quiz.published || !visibleForBatch(quiz, await batchFor(course, enrollment, req.user))) throw new HttpError(404, 'Quiz not found');
+  if (!quiz.timeLimit) throw new HttpError(400, 'This quiz has no timer. Just answer and submit.');
+  await settleExpired({ quiz: quiz._id, student: req.user._id });
+  let open = await QuizAttempt.findOne({ quiz: quiz._id, student: req.user._id, status: 'in_progress' });
+  if (!open) {
+    const used = await QuizAttempt.countDocuments({ quiz: quiz._id, student: req.user._id });
+    if (quiz.maxAttempts && used >= quiz.maxAttempts) throw new HttpError(409, 'You have used all attempts for this quiz');
+    const now = new Date();
+    try {
+      open = await QuizAttempt.create({ quiz: quiz._id, course: quiz.course, student: req.user._id, status: 'in_progress', startedAt: now, expiresAt: new Date(+now + quiz.timeLimit * 60000), score: 0, maxScore: totalOf(quiz) });
+    } catch (err) {
+      if (err.code !== 11000) throw err; // a double click started it a moment ago: use that attempt
+      open = await QuizAttempt.findOne({ quiz: quiz._id, student: req.user._id, status: 'in_progress' });
+    }
+  }
+  res.status(201).json({ attempt: { _id: open._id }, remainingMs: Math.max(0, +open.expiresAt - Date.now()), quiz: studentQuizView(quiz, true) });
+});
+
+const cleanChoice = (c, q) => {
+  if (c === null || c === undefined || c === '') return null;
+  const n = Number(c);
+  return Number.isInteger(n) && n >= 0 && n < (q.options || []).length ? n : null;
+};
+
 export const attemptQuiz = asyncHandler(async (req, res) => {
   if (!isStudent(req.user)) throw new HttpError(403, 'Only students take quizzes');
   const { quiz, course, enrollment } = await ownQuiz(req);
   if (!quiz.published || !visibleForBatch(quiz, await batchFor(course, enrollment, req.user))) throw new HttpError(404, 'Quiz not found');
-  const used = await QuizAttempt.countDocuments({ quiz: quiz._id, student: req.user._id });
-  if (quiz.maxAttempts && used >= quiz.maxAttempts) throw new HttpError(409, 'You have used all attempts for this quiz');
-  const answers = Array.isArray(req.body?.answers) ? req.body.answers.map(Number) : [];
-  let score = 0;
-  let maxScore = 0;
-  const review = quiz.questions.map((q, i) => {
-    maxScore += q.points;
-    const ok = answers[i] === q.correctIndex;
-    if (ok) score += q.points;
-    return { correctIndex: q.correctIndex, chosen: Number.isInteger(answers[i]) ? answers[i] : null, correct: ok };
+  await settleExpired({ quiz: quiz._id, student: req.user._id });
+  const open = await QuizAttempt.findOne({ quiz: quiz._id, student: req.user._id, status: 'in_progress' });
+  if (quiz.timeLimit > 0 && !open) throw new HttpError(409, 'Your time is over, or the quiz was not started. Open the quiz again.');
+  const used = await QuizAttempt.countDocuments({ quiz: quiz._id, student: req.user._id, status: { $ne: 'in_progress' } });
+  if (!open && quiz.maxAttempts && used >= quiz.maxAttempts) throw new HttpError(409, 'You have used all attempts for this quiz');
+
+  // Answers arrive as [{ question, choice, text }]. Older clients send a plain list of choices in question order.
+  const byQ = new Map((Array.isArray(req.body?.responses) ? req.body.responses : []).map((r) => [String(r.question), r]));
+  const legacy = Array.isArray(req.body?.answers) ? req.body.answers : null;
+
+  let auto = 0;
+  let max = 0;
+  let hasWritten = false;
+  const review = [];
+  const responses = quiz.questions.map((q, i) => {
+    max += q.points;
+    const r = byQ.get(sid(q._id)) || (legacy ? { choice: legacy[i] } : {});
+    if (isAuto(q)) {
+      const choice = cleanChoice(r.choice, q);
+      const ok = choice === q.correctIndex;
+      if (ok) auto += q.points;
+      review.push({ correctIndex: q.correctIndex, chosen: choice, correct: ok });
+      return { question: q._id, choice, marks: ok ? q.points : 0 };
+    }
+    hasWritten = true;
+    review.push(null);
+    return { question: q._id, text: String(r.text || '').slice(0, 8000) };
   });
-  const attempt = await QuizAttempt.create({ quiz: quiz._id, course: quiz.course, student: req.user._id, answers, score, maxScore });
-  res.status(201).json({ attempt: { _id: attempt._id, score, maxScore }, review, attemptsLeft: quiz.maxAttempts ? quiz.maxAttempts - used - 1 : null });
+
+  const fields = { responses, autoScore: auto, manualScore: 0, score: auto, maxScore: max, status: hasWritten ? 'pending' : 'graded', submittedAt: new Date() };
+  let attempt;
+  if (open) { Object.assign(open, fields); attempt = await open.save(); } else attempt = await QuizAttempt.create({ quiz: quiz._id, course: quiz.course, student: req.user._id, ...fields });
+  res.status(201).json({
+    attempt: { _id: attempt._id, score: auto, maxScore: max, status: attempt.status },
+    review: quiz.revealAnswers ? review : null,
+    hasWritten,
+    attemptsLeft: quiz.maxAttempts ? quiz.maxAttempts - used - 1 : null,
+  });
 });
 
 export const listAttempts = asyncHandler(async (req, res) => {
   const { quiz, manage } = await ownQuiz(req);
   if (!manage) throw new HttpError(403, 'Not allowed');
-  const items = await QuizAttempt.find({ quiz: quiz._id }).populate('student', 'name code').sort({ submittedAt: -1 }).lean();
-  res.json({ items });
+  await settleExpired({ quiz: quiz._id });
+  const items = await QuizAttempt.find({ quiz: quiz._id, status: { $ne: 'in_progress' } }).select('-responses -answers').populate('student', 'name code').lean();
+  items.sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1) || new Date(b.submittedAt) - new Date(a.submittedAt));
+  res.json({ items: items.map((a) => ({ ...a, status: a.status || 'graded' })) });
+});
+
+// One attempt in full: the teacher marks from it, the student reads their result from it.
+export const getAttempt = asyncHandler(async (req, res) => {
+  const attempt = await QuizAttempt.findById(req.params.id).populate('student', 'name code');
+  if (!attempt) throw new HttpError(404, 'Result not found');
+  const quiz = await Quiz.findById(attempt.quiz);
+  if (!quiz) throw new HttpError(404, 'Quiz not found');
+  const { manage } = await access(req, attempt.course);
+  if (!manage && sid(attempt.student) !== sid(req.user._id)) throw new HttpError(403, 'Not allowed');
+  if (manage) return res.json({ attempt, quiz });
+  if (attempt.status === 'in_progress') throw new HttpError(404, 'Result not found');
+  const obj = attempt.toObject();
+  if (!quiz.revealAnswers) {
+    const auto = new Set(quiz.questions.filter(isAuto).map((q) => sid(q._id)));
+    obj.responses = (obj.responses || []).map((r) => (auto.has(sid(r.question)) ? { ...r, marks: undefined } : r));
+  }
+  res.json({ attempt: obj, quiz: stripAnswers(quiz.toObject(), quiz.revealAnswers) });
+});
+
+// Teacher marks the written answers: body { marks: [{ question, marks, feedback }], comment }.
+export const gradeAttempt = asyncHandler(async (req, res) => {
+  const attempt = await QuizAttempt.findById(req.params.id);
+  if (!attempt) throw new HttpError(404, 'Result not found');
+  const { manage } = await access(req, attempt.course);
+  if (!manage) throw new HttpError(403, 'Not allowed');
+  if (attempt.status === 'in_progress') throw new HttpError(409, 'The student is still taking this quiz');
+  const quiz = await Quiz.findById(attempt.quiz);
+  if (!quiz) throw new HttpError(404, 'Quiz not found');
+
+  const given = new Map((Array.isArray(req.body?.marks) ? req.body.marks : []).map((m) => [String(m.question), m]));
+  let manual = 0;
+  let allMarked = true;
+  quiz.questions.filter((q) => !isAuto(q)).forEach((q) => {
+    let r = attempt.responses.find((x) => sid(x.question) === sid(q._id));
+    if (!r) { attempt.responses.push({ question: q._id, text: '' }); r = attempt.responses[attempt.responses.length - 1]; }
+    const g = given.get(sid(q._id));
+    if (g && g.marks !== undefined && g.marks !== null && g.marks !== '') {
+      const m = Number(g.marks);
+      if (!Number.isFinite(m) || m < 0 || m > q.points) throw new HttpError(400, `Marks for "${q.text.slice(0, 40)}" must be between 0 and ${q.points}`);
+      r.marks = Math.round(m * 2) / 2; // half marks are fine
+    }
+    if (g && g.feedback !== undefined) r.feedback = String(g.feedback || '').slice(0, 1000);
+    if (typeof r.marks === 'number') manual += r.marks; else allMarked = false;
+  });
+  attempt.manualScore = manual;
+  attempt.score = (attempt.autoScore || 0) + manual;
+  attempt.status = allMarked ? 'graded' : 'pending';
+  if (req.body?.comment !== undefined) attempt.comment = String(req.body.comment || '').slice(0, 2000);
+  Object.assign(attempt, { gradedAt: new Date(), gradedBy: req.user._id });
+  attempt.markModified('responses');
+  await attempt.save();
+  res.json({ attempt });
 });
 
 // ----- announcements -----

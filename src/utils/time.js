@@ -33,6 +33,17 @@ export const dateFromKey = (key, hhmm = '00:00') => new Date(`${key}T${hhmm}:00+
 // 0 = Sunday ... 6 = Saturday
 export const weekdayOfKey = (key) => new Date(`${key}T12:00:00+05:00`).getUTCDay();
 
+// Student classes run on these days only (0 = Sunday ... 6 = Saturday). Change this one line if the schedule changes.
+export const CLASS_DAYS = [6, 0];
+export const CLASS_DAYS_TEXT = 'Saturday and Sunday';
+export const isClassDay = (key) => CLASS_DAYS.includes(weekdayOfKey(key));
+// The most recent class day on or before the given date (today by default).
+export function lastClassDay(key = dateKey()) {
+  let k = key;
+  for (let i = 0; i < 7 && !isClassDay(k); i += 1) k = addDays(k, -1);
+  return k;
+}
+
 export function datesBetween(from, to) {
   const out = [];
   const d = new Date(`${from}T00:00:00Z`);

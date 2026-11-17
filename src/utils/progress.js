@@ -75,12 +75,15 @@ function quizzesPart(quizzes, attempts) {
   const items = quizzes.map((q) => {
     const maxScore = (q.questions || []).reduce((s, x) => s + (x.points || 1), 0);
     const mine = byQuiz.get(sid(q._id)) || [];
-    const best = mine.reduce((m, a) => Math.max(m, a.score), 0); // the best attempt counts
-    earned += mine.length ? best : 0; // a published quiz that was never attempted counts as zero
+    const marked = mine.filter((a) => !a.status || a.status === 'graded'); // older attempts have no status and are final
+    const waiting = mine.some((a) => a.status === 'pending'); // handed in, written answers not marked yet
+    const best = marked.reduce((m, a) => Math.max(m, a.score), 0); // the best marked attempt counts
+    if (!marked.length && waiting) return { _id: q._id, title: q.title, maxScore, attempts: mine.length, best: null, status: 'submitted', counted: false };
+    earned += marked.length ? best : 0; // a published quiz that was never attempted counts as zero
     possible += maxScore;
-    return { _id: q._id, title: q.title, maxScore, attempts: mine.length, best: mine.length ? best : null, status: mine.length ? 'attempted' : 'not_attempted', counted: true };
+    return { _id: q._id, title: q.title, maxScore, attempts: mine.length, best: marked.length ? best : null, status: marked.length ? 'attempted' : 'not_attempted', counted: true };
   });
-  return { percent: pct(earned, possible), earned, possible, counted: items.length, total: items.length, items };
+  return { percent: pct(earned, possible), earned, possible, counted: items.filter((i) => i.counted).length, total: items.length, items };
 }
 
 // Pure function: all the data in, the full breakdown out. Easy to test, no database inside.
@@ -132,7 +135,7 @@ export async function computeProgress(items) {
     Assignment.find({ course: { $in: courseIds } }).select('course title dueDate maxPoints batches').lean(),
     Submission.find({ course: { $in: courseIds }, student: { $in: studentIds } }).select('assignment course student grade gradedAt late').lean(),
     Quiz.find({ course: { $in: courseIds }, published: true }).select('course title questions.points batches').lean(),
-    QuizAttempt.find({ course: { $in: courseIds }, student: { $in: studentIds } }).select('quiz course student score').lean(),
+    QuizAttempt.find({ course: { $in: courseIds }, student: { $in: studentIds } }).select('quiz course student score status').lean(),
     batchIds.length ? Batch.find({ _id: { $in: batchIds } }).select('courseId').lean() : [],
   ]);
   const marks = batchIds.length

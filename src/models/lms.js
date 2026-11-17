@@ -52,6 +52,25 @@ const enrollmentSchema = new Schema(
 enrollmentSchema.index({ course: 1, student: 1 }, { unique: true });
 enrollmentSchema.index({ 'certificate.code': 1 }, { unique: true, partialFilterExpression: { 'certificate.code': { $type: 'string' } } });
 
+// ---------- Files (assignment briefs and student work, stored in the database) ----------
+const storedFileSchema = new Schema(
+  {
+    course: ref('Course', { required: true, index: true }),
+    owner: ref('User', { required: true, index: true }),
+    kind: { type: String, enum: ['submission', 'assignment'], required: true },
+    name: { type: String, required: true, maxlength: 160 },
+    mime: { type: String, default: 'application/octet-stream', maxlength: 120 },
+    size: { type: Number, required: true, min: 1 },
+    data: { type: Buffer, required: true },
+    attached: { type: Boolean, default: false, index: true }, // false until it is saved on an assignment or submission
+  },
+  { timestamps: true }
+);
+const fileRefSchema = new Schema(
+  { file: ref('StoredFile', { required: true }), name: String, size: Number, mime: String },
+  { _id: false }
+);
+
 // ---------- Assignments ----------
 const assignmentSchema = new Schema(
   {
@@ -61,6 +80,8 @@ const assignmentSchema = new Schema(
     dueDate: { type: String, match: DATE_RE },
     maxPoints: { type: Number, default: 100, min: 1, max: 1000 },
     allowLate: { type: Boolean, default: true },
+    requireAttachment: { type: Boolean, default: false }, // students must hand in a file or a link
+    attachments: [fileRefSchema], // brief or starter files from the teacher
     batches: [ref('Batch')], // empty = every batch of the course; otherwise only these batches
     createdBy: ref('User'),
   },
@@ -72,8 +93,10 @@ const submissionSchema = new Schema(
     assignment: ref('Assignment', { required: true, index: true }),
     course: ref('Course', { required: true, index: true }),
     student: ref('User', { required: true, index: true }),
-    text: { type: String, maxlength: 10000 },
-    link: { type: String, trim: true, maxlength: 600 },
+    text: { type: String, maxlength: 10000 }, // optional note to the teacher
+    link: { type: String, trim: true, maxlength: 600 }, // first link (older submissions only have this)
+    links: [{ type: String, trim: true, maxlength: 600 }],
+    files: [fileRefSchema],
     submittedAt: { type: Date, default: Date.now },
     late: { type: Boolean, default: false },
     grade: { type: Number, min: 0 },
@@ -87,9 +110,19 @@ submissionSchema.index({ assignment: 1, student: 1 }, { unique: true });
 
 // ---------- Quizzes (multiple choice, marked automatically) ----------
 const questionSchema = new Schema({
-  text: { type: String, required: true, trim: true, maxlength: 600 },
-  options: { type: [String], validate: (v) => v.length >= 2 && v.length <= 6 },
-  correctIndex: { type: Number, required: true, min: 0 },
+  type: { type: String, enum: ['mcq', 'tf', 'short', 'code'], default: 'mcq' }, // mcq and tf are marked automatically
+  section: { type: String, trim: true, maxlength: 160 }, // e.g. "Section A: Multiple Choice Questions"
+  text: { type: String, required: true, trim: true, maxlength: 1500 },
+  code: { type: String, maxlength: 4000 }, // optional code shown with the question
+  options: {
+    type: [String],
+    validate: {
+      validator(v) { return !['mcq', 'tf', undefined].includes(this.type) || (v.length >= 2 && v.length <= 6); },
+      message: 'A choice question needs 2 to 6 options',
+    },
+  },
+  correctIndex: { type: Number, default: 0, min: 0 },
+  modelAnswer: { type: String, maxlength: 3000 }, // for the teacher while marking; students never get it before the result
   points: { type: Number, default: 1, min: 1, max: 100 },
 });
 
@@ -99,6 +132,10 @@ const quizSchema = new Schema(
     title: { type: String, required: true, trim: true, maxlength: 160 },
     description: { type: String, maxlength: 2000 },
     maxAttempts: { type: Number, default: 1, min: 0, max: 20 }, // 0 = unlimited
+    instructions: { type: String, maxlength: 3000 },
+    kind: { type: String, enum: ['daily', 'weekly'], default: 'daily' }, // daily = multiple choice only; weekly = full paper with sections
+    timeLimit: { type: Number, default: 0, min: 0, max: 300 }, // minutes, 0 = no timer
+    revealAnswers: { type: Boolean, default: true }, // show the correct answers after the student finishes
     published: { type: Boolean, default: true },
     batches: [ref('Batch')], // empty = every batch of the course; otherwise only these batches
     questions: [questionSchema],
@@ -112,13 +149,30 @@ const attemptSchema = new Schema(
     quiz: ref('Quiz', { required: true, index: true }),
     course: ref('Course', { required: true, index: true }),
     student: ref('User', { required: true, index: true }),
-    answers: [Number],
+    answers: [Number], // older attempts only
+    responses: [new Schema({
+      question: { type: Schema.Types.ObjectId, required: true },
+      choice: Number, // mcq / true-false: index of the chosen option
+      text: { type: String, maxlength: 8000 }, // written or code answer
+      marks: Number, // automatic for choice questions, set by the teacher for written ones
+      feedback: { type: String, maxlength: 1000 },
+    }, { _id: false })],
+    status: { type: String, enum: ['in_progress', 'pending', 'graded'], default: 'graded' }, // pending = written answers still to be marked
+    startedAt: Date,
+    expiresAt: Date, // timed quizzes
+    autoScore: Number,
+    manualScore: Number,
     score: { type: Number, required: true },
     maxScore: { type: Number, required: true },
+    comment: { type: String, maxlength: 2000 },
+    gradedAt: Date,
+    gradedBy: ref('User'),
     submittedAt: { type: Date, default: Date.now },
   },
   { timestamps: true }
 );
+// One unfinished attempt per student per quiz, so a double click cannot start two.
+attemptSchema.index({ quiz: 1, student: 1 }, { unique: true, partialFilterExpression: { status: 'in_progress' } });
 
 // ---------- Announcements ----------
 const announcementSchema = new Schema(
@@ -131,6 +185,7 @@ const announcementSchema = new Schema(
   { timestamps: true }
 );
 
+export const StoredFile = mongoose.model('StoredFile', storedFileSchema);
 export const Course = mongoose.model('Course', courseSchema);
 export const Enrollment = mongoose.model('Enrollment', enrollmentSchema);
 export const Assignment = mongoose.model('Assignment', assignmentSchema);
