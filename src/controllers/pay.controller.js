@@ -1,4 +1,5 @@
 import { FeeAccount, Payment, SalaryProfile, Payslip } from '../models/pay.js';
+import { audit } from '../utils/audit.js';
 import { User, STAFF_ROLES } from '../models/User.js';
 import { Attendance } from '../models/Attendance.js';
 import { Leave } from '../models/Leave.js';
@@ -91,6 +92,7 @@ export const setPlan = asyncHandler(async (req, res) => {
     const method = METHODS.includes(req.body.advance?.method) ? req.body.advance.method : 'cash';
     payment = await Payment.create({ receiptNo: `RCPT-${String(n).padStart(5, '0')}`, student: student._id, amount: advance, date: advDate, method, reference: req.body.advance?.reference, note: 'Advance', receivedBy: req.user._id });
   }
+  await audit(req, 'fee.plan', { entity: 'FeeAccount', entityId: acc._id, summary: `Fee plan saved for ${student.name}: total Rs ${total}${payment ? `, advance Rs ${payment.amount}` : ''}`, details: { courseFee, admissionFee, discount, total, installments: installments.length, advance: payment ? payment.amount : 0 } });
   res.json({ account: acc, payment });
 });
 
@@ -109,12 +111,14 @@ export const addPayment = asyncHandler(async (req, res) => {
   if (amount > balance) throw new HttpError(400, `Only Rs ${balance} is outstanding for this student`);
   const n = await nextSeq('receipt');
   const p = await Payment.create({ receiptNo: `RCPT-${String(n).padStart(5, '0')}`, student: student._id, amount, date, method, reference: req.body.reference, note: req.body.note, receivedBy: req.user._id });
+  await audit(req, 'payment.add', { entity: 'Payment', entityId: p._id, summary: `Rs ${amount} received from ${student.name} (${p.receiptNo})`, details: { student: student._id, amount, method, date, reference: req.body.reference } });
   res.status(201).json({ payment: p });
 });
 
 export const voidPayment = asyncHandler(async (req, res) => {
   const p = await Payment.findById(req.params.id);
   if (!p) throw new HttpError(404, 'Payment not found');
+  await audit(req, 'payment.void', { entity: 'Payment', entityId: p._id, summary: `Payment ${p.receiptNo} of Rs ${p.amount} was removed`, details: { student: p.student, amount: p.amount, method: p.method, date: p.date, receiptNo: p.receiptNo } });
   await p.deleteOne();
   res.json({ message: 'Payment removed' });
 });
@@ -143,7 +147,9 @@ export const setSalary = asyncHandler(async (req, res) => {
   const base = money(req.body.base);
   if (base <= 0) throw new HttpError(400, 'Enter the monthly salary');
   const allowances = (req.body.allowances || []).filter((a) => a.label?.trim() && money(a.amount) > 0).map((a) => ({ label: a.label.trim(), amount: money(a.amount) }));
+  const before = await SalaryProfile.findOne({ user: u._id }).lean();
   const p = await SalaryProfile.findOneAndUpdate({ user: u._id }, { base, allowances }, { upsert: true, new: true, setDefaultsOnInsert: true });
+  await audit(req, 'salary.set', { entity: 'SalaryProfile', entityId: p._id, summary: `Salary of ${u.name} set to Rs ${base}${before ? ` (was Rs ${before.base})` : ''}`, details: { user: u._id, before: before ? { base: before.base, allowances: before.allowances } : null, after: { base, allowances } } });
   res.json({ profile: p });
 });
 
@@ -175,6 +181,9 @@ async function compute(user, profile, month, settings) {
   return { base: profile.base, allowances: profile.allowances.map((a) => ({ label: a.label, amount: a.amount })), workingDays: working.length, paidDays: counted.length - absent, absentDays: absent, perDay: Math.round(perDay), absentDeduction: Math.round(perDay * absent) };
 }
 
+// Exported so the money maths can be tested on its own.
+export { summarize, compute, totals };
+
 export const generatePayroll = asyncHandler(async (req, res) => {
   const month = String(req.body?.month || '');
   if (!/^\d{4}-\d{2}$/.test(month)) throw new HttpError(400, 'Choose a month');
@@ -195,6 +204,7 @@ export const generatePayroll = asyncHandler(async (req, res) => {
     existing ? updated++ : created++;
   }
   if (!profiles.length) throw new HttpError(400, 'Set salaries for employees first');
+  await audit(req, 'payroll.generate', { entity: 'Payslip', summary: `Payroll for ${month}: ${created} created, ${updated} updated`, details: { month, created, updated } });
   res.json({ created, updated });
 });
 
@@ -209,10 +219,12 @@ export const updatePayslip = asyncHandler(async (req, res) => {
   if (!slip) throw new HttpError(404, 'Payslip not found');
   if (slip.status === 'paid') throw new HttpError(409, 'This payslip is already paid and cannot be changed');
   const items = (req.body.items || []).filter((i) => i.label?.trim() && money(i.amount) !== 0).map((i) => ({ label: i.label.trim(), amount: money(i.amount) }));
+  const before = { net: slip.net, items: slip.items.map((i) => ({ label: i.label, amount: i.amount })) };
   slip.items = items;
   if (req.body.note !== undefined) slip.note = req.body.note;
   totals(slip);
   await slip.save();
+  await audit(req, 'payslip.edit', { entity: 'Payslip', entityId: slip._id, summary: `Payslip ${slip.month} edited: net Rs ${before.net} to Rs ${slip.net}`, details: { user: slip.user, before, after: { net: slip.net, items } } });
   res.json({ payslip: slip });
 });
 
@@ -224,6 +236,7 @@ export const payPayslip = asyncHandler(async (req, res) => {
   slip.paidAt = new Date();
   slip.method = METHODS.includes(req.body?.method) ? req.body.method : 'bank';
   await slip.save();
+  await audit(req, 'payslip.pay', { entity: 'Payslip', entityId: slip._id, summary: `Payslip ${slip.month} marked paid: Rs ${slip.net} by ${slip.method}`, details: { user: slip.user, net: slip.net, method: slip.method } });
   res.json({ payslip: slip });
 });
 
@@ -231,6 +244,7 @@ export const deletePayslip = asyncHandler(async (req, res) => {
   const slip = await Payslip.findById(req.params.id);
   if (!slip) throw new HttpError(404, 'Payslip not found');
   if (slip.status === 'paid') throw new HttpError(409, 'A paid payslip cannot be deleted');
+  await audit(req, 'payslip.delete', { entity: 'Payslip', entityId: slip._id, summary: `Payslip ${slip.month} deleted (Rs ${slip.net})`, details: { user: slip.user, net: slip.net } });
   await slip.deleteOne();
   res.json({ message: 'Deleted' });
 });

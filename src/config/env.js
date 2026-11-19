@@ -15,6 +15,15 @@ export const env = {
   adminName: process.env.ADMIN_NAME || 'Admin',
   adminEmail: process.env.ADMIN_EMAIL,
   adminPassword: process.env.ADMIN_PASSWORD,
+  // Auto-created logins: <ID>@<loginDomain>, e.g. nz-std-0008@nexonez.com, with this starting password.
+  loginDomain: (process.env.LOGIN_DOMAIN || 'nexonez.com').toLowerCase().replace(/^@/, ''),
+  defaultPassword: process.env.DEFAULT_PASSWORD || 'nz123',
+  // Free browser push notifications (Web Push / VAPID). Generate keys once with: npm run vapid
+  vapid: {
+    publicKey: process.env.VAPID_PUBLIC_KEY,
+    privateKey: process.env.VAPID_PRIVATE_KEY,
+    subject: process.env.VAPID_SUBJECT || 'mailto:admin@nexonez.com',
+  },
 };
 
 export function assertEnv() {

@@ -1,3 +1,4 @@
+import { audit } from '../utils/audit.js';
 import { StudentAttendance } from '../models/StudentAttendance.js';
 import { User } from '../models/User.js';
 import { Batch } from '../models/Batch.js';
@@ -76,7 +77,9 @@ export const saveSheet = asyncHandler(async (req, res) => {
       });
     }
   }
+  const had = await StudentAttendance.exists({ batch: b._id, date });
   if (ops.length) await StudentAttendance.bulkWrite(ops);
+  await audit(req, 'studentAttendance.save', { entity: 'StudentAttendance', entityId: b._id, summary: `Class attendance for ${b.name} on ${date} ${had ? 're-saved (replaced)' : 'saved'}: ${ops.length} students`, details: { batch: b._id, date, replaced: !!had, absent: records.filter((r) => r.status === 'absent').length } });
   res.json({ message: 'Attendance saved', saved: ops.length });
 });
 

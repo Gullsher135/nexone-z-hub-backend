@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { StoredFile } from '../models/lms.js';
+import { deleteStoredFiles, readFile, saveFile } from '../utils/fileStore.js';
 import { courseAccess } from './lms.controller.js';
 import { HttpError, asyncHandler } from '../utils/helpers.js';
 
@@ -25,18 +26,24 @@ export const uploadFile = asyncHandler(async (req, res) => {
   if (buf.length > MAX_FILE_BYTES) throw new HttpError(413, 'File is too large. The limit is 10 MB.');
 
   // Uploads that were never saved on anything are removed after a day.
-  await StoredFile.deleteMany({ attached: false, createdAt: { $lt: new Date(Date.now() - 24 * 3600 * 1000) } });
+  await deleteStoredFiles({ attached: false, createdAt: { $lt: new Date(Date.now() - 24 * 3600 * 1000) } });
   if ((await StoredFile.countDocuments({ owner: req.user._id, attached: false })) >= MAX_LOOSE) {
     throw new HttpError(400, 'Too many unsent files. Submit your work first or try again tomorrow.');
   }
-  const doc = await StoredFile.create({ course, owner: req.user._id, kind, name: cleanName(req.query.name), mime: cleanMime(req.query.type), size: buf.length, data: buf });
+  let doc;
+  try {
+    doc = await saveFile({ _id: new mongoose.Types.ObjectId(), course, owner: req.user._id, kind, name: cleanName(req.query.name), mime: cleanMime(req.query.type), buffer: buf });
+  } catch (err) {
+    if (err.name === 'ValidationError') throw err;
+    throw new HttpError(502, 'The file could not be saved to storage. Please try again in a moment.');
+  }
   res.status(201).json({ file: { file: doc._id, name: doc.name, size: doc.size, mime: doc.mime } });
 });
 
 // GET /lms/files/:id
 export const downloadFile = asyncHandler(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) throw new HttpError(404, 'File not found');
-  const f = await StoredFile.findById(req.params.id);
+  const f = await StoredFile.findById(req.params.id).select('+data');
   if (!f) throw new HttpError(404, 'File not found');
   const { manage } = await courseAccess(req, f.course); // course teachers, admin and enrolled students only
   const mine = String(f.owner) === String(req.user._id);
@@ -49,5 +56,8 @@ export const downloadFile = asyncHandler(async (req, res) => {
     'X-Content-Type-Options': 'nosniff',
     'Cache-Control': 'private, no-store',
   });
-  res.send(Buffer.from(f.data));
+  let bytes;
+  try { bytes = await readFile(f); } catch { throw new HttpError(502, 'The file could not be read from storage. Please try again in a moment.'); }
+  if (!bytes) throw new HttpError(404, 'The file is missing from storage');
+  res.send(bytes);
 });

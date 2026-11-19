@@ -1,9 +1,12 @@
+import { sendPush } from '../utils/push.js';
+import { audit } from '../utils/audit.js';
 import crypto from 'crypto';
-import { Course, Enrollment, Assignment, Submission, Quiz, QuizAttempt, Announcement, StoredFile } from '../models/lms.js';
+import { Course, Enrollment, Assignment, Submission, Quiz, QuizAttempt, Announcement, StoredFile, Presentation, PresentationEntry } from '../models/lms.js';
 import mongoose from 'mongoose';
 import { User, STAFF_ROLES } from '../models/User.js';
 import { Batch } from '../models/Batch.js';
 import { StudentAttendance } from '../models/StudentAttendance.js';
+import { deleteStoredFiles } from '../utils/fileStore.js';
 import { computeProgress, progressKey, visibleForBatch } from '../utils/progress.js';
 import { nextSeq } from '../models/Counter.js';
 import { HttpError, asyncHandler, pick, randomPassword } from '../utils/helpers.js';
@@ -45,6 +48,7 @@ async function access(req, id = req.params.id) {
 }
 
 export { access as courseAccess };
+export { batchFor, cleanBatches, withBatchNames, planFiles, applyPlan, cleanLinks }; // shared with the presentation module
 
 // The batch a student sits in for this course: their own enrolment first, then their general batch.
 // A batch that belongs to another course is ignored.
@@ -174,7 +178,7 @@ export const deleteCourse = asyncHandler(async (req, res) => {
   const course = await Course.findById(req.params.id);
   if (!course) throw new HttpError(404, 'Course not found');
   const f = { course: course._id };
-  await Promise.all([Enrollment.deleteMany(f), Assignment.deleteMany(f), Submission.deleteMany(f), Quiz.deleteMany(f), QuizAttempt.deleteMany(f), Announcement.deleteMany(f), StoredFile.deleteMany(f)]);
+  await Promise.all([Enrollment.deleteMany(f), Assignment.deleteMany(f), Submission.deleteMany(f), Quiz.deleteMany(f), QuizAttempt.deleteMany(f), Announcement.deleteMany(f), Presentation.deleteMany(f), PresentationEntry.deleteMany(f), deleteStoredFiles(f)]);
   await Batch.updateMany({ courseId: course._id }, { $unset: { courseId: '' } }).catch(() => {});
   await course.deleteOne();
   res.json({ message: 'Deleted' });
@@ -323,7 +327,7 @@ async function planFiles(rawIds, { course, owner, kind, existing = [] }) {
 }
 async function applyPlan(plan) {
   if (plan.add.length) await StoredFile.updateMany({ _id: { $in: plan.add } }, { attached: true });
-  if (plan.remove.length) await StoredFile.deleteMany({ _id: { $in: plan.remove } });
+  if (plan.remove.length) await deleteStoredFiles({ _id: { $in: plan.remove } });
 }
 
 function cleanLinks(raw) {
@@ -382,7 +386,7 @@ export const deleteAssignment = asyncHandler(async (req, res) => {
   const subs = await Submission.find({ assignment: a._id }).select('files').lean();
   const fileIds = [...a.attachments.map((x) => x.file), ...subs.flatMap((x) => (x.files || []).map((y) => y.file))];
   await Submission.deleteMany({ assignment: a._id });
-  if (fileIds.length) await StoredFile.deleteMany({ _id: { $in: fileIds } });
+  if (fileIds.length) await deleteStoredFiles({ _id: { $in: fileIds } });
   await a.deleteOne();
   res.json({ message: 'Deleted' });
 });
@@ -422,8 +426,10 @@ export const gradeSubmission = asyncHandler(async (req, res) => {
   const a = await Assignment.findById(sub.assignment);
   const grade = Number(req.body.grade);
   if (!Number.isFinite(grade) || grade < 0 || grade > a.maxPoints) throw new HttpError(400, `Marks must be between 0 and ${a.maxPoints}`);
+  const before = sub.gradedAt ? sub.grade : null;
   Object.assign(sub, { grade, feedback: req.body.feedback || '', gradedAt: new Date(), gradedBy: req.user._id });
   await sub.save();
+  await audit(req, 'grade.assignment', { entity: 'Submission', entityId: sub._id, summary: `Assignment "${a.title}" marked ${grade}/${a.maxPoints}${before !== null ? ` (was ${before})` : ''}`, details: { student: sub.student, assignment: a._id, before, after: grade } });
   res.json({ submission: sub });
 });
 
@@ -714,6 +720,7 @@ export const gradeAttempt = asyncHandler(async (req, res) => {
   const quiz = await Quiz.findById(attempt.quiz);
   if (!quiz) throw new HttpError(404, 'Quiz not found');
 
+  const before = attempt.score;
   const given = new Map((Array.isArray(req.body?.marks) ? req.body.marks : []).map((m) => [String(m.question), m]));
   let manual = 0;
   let allMarked = true;
@@ -736,6 +743,7 @@ export const gradeAttempt = asyncHandler(async (req, res) => {
   Object.assign(attempt, { gradedAt: new Date(), gradedBy: req.user._id });
   attempt.markModified('responses');
   await attempt.save();
+  await audit(req, 'grade.quiz', { entity: 'QuizAttempt', entityId: attempt._id, summary: `Quiz "${quiz.title}" marked: ${attempt.score}/${attempt.maxScore}${before !== attempt.score ? ` (was ${before})` : ''}`, details: { student: attempt.student, quiz: quiz._id, before, after: attempt.score, status: attempt.status } });
   res.json({ attempt });
 });
 
@@ -750,6 +758,10 @@ export const createAnnouncement = asyncHandler(async (req, res) => {
   const { course } = await access(req);
   if (!req.body?.title) throw new HttpError(400, 'Title is required');
   const a = await Announcement.create({ course: course._id, title: req.body.title, body: req.body.body, author: req.user._id });
+  // Tell the enrolled students, even when the site is closed.
+  Enrollment.find({ course: course._id }).distinct('student')
+    .then((ids) => sendPush(ids, { title: `${course.title}: ${a.title}`, body: (a.body || '').slice(0, 140), url: `/learn/course/${course._id}`, tag: `ann-${a._id}` }))
+    .catch((e) => console.error('push failed', e.message));
   res.status(201).json({ announcement: a });
 });
 

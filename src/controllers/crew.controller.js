@@ -5,10 +5,14 @@ import { User, STAFF_ROLES } from '../models/User.js';
 import { getSettings } from '../models/Setting.js';
 import { HttpError, asyncHandler, pick } from '../utils/helpers.js';
 import { DATE_RE, dateKey, datesBetween, weekdayOfKey } from '../utils/time.js';
+import { notifyRoles } from '../utils/push.js';
 
 const isAdmin = (u) => u.role === 'admin';
 const sid = (v) => String(v?._id || v);
-const audienceFor = (role) => ({ audience: { $in: ['all', role] } });
+const STAFF = ['employee', 'intern'];
+// Staff also see notices for "all staff"; students and teachers only see their own and "everyone".
+const audienceFor = (role) => ({ audience: { $in: STAFF.includes(role) ? ['all', 'everyone', role] : ['everyone', role] } });
+const NOTICE_ROLES = { all: ['employee', 'intern'], employee: ['employee'], intern: ['intern'], student: ['student'], teacher: ['teacher'], everyone: ['employee', 'intern', 'student', 'teacher'] };
 
 // Working days in a leave that fall inside [from, to], skipping weekly off days and holidays.
 function workingDays(l, from, to, settings) {
@@ -85,7 +89,7 @@ export const listNotices = asyncHandler(async (req, res) => {
 export const markNoticeRead = asyncHandler(async (req, res) => {
   const n = await Notice.findById(req.params.id);
   if (!n) throw new HttpError(404, 'Notice not found');
-  if (n.audience !== 'all' && n.audience !== req.user.role && !isAdmin(req.user)) throw new HttpError(403, 'Not for you');
+  if (!isAdmin(req.user) && !audienceFor(req.user.role).audience.$in.includes(n.audience)) throw new HttpError(403, 'Not for you');
   await Notice.updateOne({ _id: n._id }, { $addToSet: { readBy: req.user._id } });
   res.json({ message: 'Read' });
 });
@@ -99,6 +103,8 @@ const NOTICE_FIELDS = ['title', 'body', 'audience', 'pinned'];
 export const createNotice = asyncHandler(async (req, res) => {
   if (!req.body?.title?.trim()) throw new HttpError(400, 'Title is required');
   const n = await Notice.create({ ...pick(req.body, NOTICE_FIELDS), author: req.user._id, readBy: [req.user._id] });
+  // Push to phones and computers even when the site is closed (fire and forget).
+  notifyRoles(NOTICE_ROLES[n.audience] || [], { title: n.title, body: (n.body || '').slice(0, 140), tag: `notice-${n._id}` }).catch((e) => console.error('push failed', e.message));
   res.status(201).json({ notice: n });
 });
 export const updateNotice = asyncHandler(async (req, res) => {

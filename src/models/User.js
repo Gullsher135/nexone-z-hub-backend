@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { DATE_RE, TIME_RE } from '../utils/time.js';
 import { nextSeq } from './Counter.js';
+import { env } from '../config/env.js';
 
 export const ROLES = ['admin', 'employee', 'intern', 'student', 'teacher'];
 export const STAFF_ROLES = ['employee', 'intern']; // roles tracked with entry/exit time
@@ -67,6 +68,13 @@ userSchema.pre('validate', async function assignCode(next) {
   if (!this.code) {
     const n = await nextSeq(`user-${this.role}`);
     this.code = `NZ-${PREFIX[this.role]}-${String(n).padStart(4, '0')}`;
+  }
+  // Every new person gets a login automatically: NZ-STD-0008 -> nz-std-0008@nexonez.com, starting password nz123.
+  // An email typed in by the admin is kept; the person must choose their own password on first login.
+  if (this.isNew && !this.email) this.email = `${this.code.toLowerCase()}@${env.loginDomain}`;
+  if (this.isNew && !this.password) {
+    this.password = env.defaultPassword;
+    this.mustChangePassword = true;
   }
   next();
 });

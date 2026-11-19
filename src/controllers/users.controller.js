@@ -1,14 +1,17 @@
+import { audit } from '../utils/audit.js';
 import { User, ROLES } from '../models/User.js';
 import { Batch } from '../models/Batch.js';
 import { Attendance } from '../models/Attendance.js';
 import { StudentAttendance } from '../models/StudentAttendance.js';
 import { Leave } from '../models/Leave.js';
-import { Enrollment, Submission, QuizAttempt, Course, StoredFile } from '../models/lms.js';
+import { Enrollment, Submission, QuizAttempt, Course, PresentationEntry } from '../models/lms.js';
+import { deleteStoredFiles } from '../utils/fileStore.js';
 import { FeeAccount, Payment, SalaryProfile, Payslip } from '../models/pay.js';
 import { Task } from '../models/crew.js';
 import { detachUser } from './flow.controller.js';
 import { Letter } from '../models/docs.js';
 import { HttpError, asyncHandler, escapeRegex, pick, randomPassword } from '../utils/helpers.js';
+import { env } from '../config/env.js';
 
 const EDITABLE = [
   'name', 'email', 'phone', 'cnic', 'designation', 'department', 'joiningDate', 'shift',
@@ -67,28 +70,19 @@ export const createUser = asyncHandler(async (req, res) => {
   data.role = role;
   await assertEmailFree(data.email);
 
-  let tempPassword;
-  if (isStaffLogin(role)) {
-    if (!data.email) throw new HttpError(400, 'Email is required for employees, interns, teachers and admins');
-    tempPassword = req.body.password || randomPassword();
-    if (tempPassword.length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
-    data.password = tempPassword;
-    data.mustChangePassword = !req.body.password;
-    if (!data.joiningDate) data.joiningDate = new Date().toISOString().slice(0, 10);
-  } else {
-    if (data.batch) {
-      const b = await Batch.findById(data.batch);
-      if (!b) throw new HttpError(400, 'Batch not found');
-    }
-    // A student gets a login for the learning portal when an email is given and a login is asked for.
-    if (req.body.createLogin || req.body.password) {
-      if (!data.email) throw new HttpError(400, 'Add the student\'s email to give them a login');
-      tempPassword = req.body.password || randomPassword();
-      if (tempPassword.length < MIN_PASSWORD) throw new HttpError(400, 'Password must be at least 8 characters');
-      data.password = tempPassword;
-      data.mustChangePassword = !req.body.password;
-    }
+  // Email is optional: when it is left empty the model creates <ID>@nexonez.com. Password defaults to nz123.
+  if (req.body.password) {
+    if (String(req.body.password).length < MIN_PASSWORD) throw new HttpError(400, 'Password must be at least 8 characters');
+    data.password = String(req.body.password);
+    data.mustChangePassword = false;
   }
+  if (isStaffLogin(role)) {
+    if (!data.joiningDate) data.joiningDate = new Date().toISOString().slice(0, 10);
+  } else if (data.batch) {
+    const b = await Batch.findById(data.batch);
+    if (!b) throw new HttpError(400, 'Batch not found');
+  }
+  const tempPassword = req.body.password || env.defaultPassword;
   if (role !== 'intern') delete data.internship;
 
   const user = await User.create(data);
@@ -111,7 +105,9 @@ export const updateUser = asyncHandler(async (req, res) => {
   if (user.role !== 'intern') user.internship = undefined;
   if (user.role !== 'student') user.batch = undefined;
 
+  const wasRole = user.role; const wasActive = user.isActive;
   await user.save();
+  if (wasRole !== user.role || wasActive !== user.isActive) await audit(req, 'user.access', { entity: 'User', entityId: user._id, summary: `${user.name}: ${wasRole !== user.role ? `role ${wasRole} to ${user.role}` : ''}${wasActive !== user.isActive ? ` account ${user.isActive ? 'activated' : 'deactivated'}` : ''}`.trim(), details: { role: [wasRole, user.role], isActive: [wasActive, user.isActive] } });
   await user.populate('batch', 'name course');
   res.json({ user });
 });
@@ -140,6 +136,7 @@ export const resetPassword = asyncHandler(async (req, res) => {
   user.password = tempPassword;
   user.mustChangePassword = true;
   await user.save();
+  await audit(req, 'user.password-reset', { entity: 'User', entityId: user._id, summary: `Password reset for ${user.name}` });
   res.json({ tempPassword });
 });
 
@@ -173,7 +170,8 @@ export const deleteUser = asyncHandler(async (req, res) => {
     Enrollment.deleteMany({ student: user._id }),
     Submission.deleteMany({ student: user._id }),
     QuizAttempt.deleteMany({ student: user._id }),
-    StoredFile.deleteMany({ owner: user._id, kind: 'submission' }),
+    PresentationEntry.deleteMany({ student: user._id }),
+    deleteStoredFiles({ owner: user._id, kind: 'submission' }),
     FeeAccount.deleteMany({ student: user._id }),
     Payment.deleteMany({ student: user._id }),
     SalaryProfile.deleteMany({ user: user._id }),

@@ -11,10 +11,13 @@ import * as leaves from '../controllers/leaves.controller.js';
 import * as reports from '../controllers/reports.controller.js';
 import * as lms from '../controllers/lms.controller.js';
 import * as files from '../controllers/files.controller.js';
+import * as pres from '../controllers/presentation.controller.js';
+import * as auditCtl from '../controllers/audit.controller.js';
 import * as crew from '../controllers/crew.controller.js';
 import * as pay from '../controllers/pay.controller.js';
 import * as flow from '../controllers/flow.controller.js';
 import * as docs from '../controllers/docs.controller.js';
+import * as push from '../controllers/push.controller.js';
 
 const router = Router();
 
@@ -35,8 +38,15 @@ router.post('/auth/login', loginLimiter, auth.login);
 router.get('/auth/me', protect, auth.me);
 router.post('/auth/change-password', protect, auth.changePassword);
 
+// ---- push notifications ----
+router.get('/push/key', protect, push.publicKey);
+router.post('/push/subscribe', protect, push.subscribe);
+router.post('/push/unsubscribe', protect, push.unsubscribe);
+router.post('/push/test', protect, push.test);
+
 // ---- settings ----
 router.get('/settings', protect, settings.getSettingsHandler);
+router.get('/audit', protect, adminOnly, auditCtl.listAudit);
 router.put('/settings', protect, adminOnly, settings.updateSettings);
 router.get('/settings/my-ip', protect, adminOnly, settings.myIp);
 router.post('/settings/resolve-map', protect, adminOnly, settings.resolveMap);
@@ -135,6 +145,15 @@ router.post('/lms/courses/:id/quizzes', protect, teachRoles, lms.createQuiz);
 router.get('/lms/quizzes/:id', protect, lms.getQuiz);
 router.patch('/lms/quizzes/:id', protect, teachRoles, lms.updateQuiz);
 router.delete('/lms/quizzes/:id', protect, teachRoles, lms.deleteQuiz);
+router.get('/lms/courses/:id/presentations', protect, pres.listPresentations);
+router.post('/lms/courses/:id/presentations', protect, teachRoles, pres.createPresentation);
+router.patch('/lms/presentations/:id', protect, teachRoles, pres.updatePresentation);
+router.delete('/lms/presentations/:id', protect, teachRoles, pres.deletePresentation);
+router.get('/lms/presentations/:id/entries', protect, teachRoles, pres.listEntries);
+router.put('/lms/presentations/:id/topics', protect, teachRoles, pres.setTopics);
+router.post('/lms/presentations/:id/auto-assign', protect, teachRoles, pres.autoAssign);
+router.post('/lms/presentations/:id/slides', protect, requireRole('student'), pres.submitSlides);
+router.patch('/lms/presentation-entries/:id/grade', protect, teachRoles, pres.gradeEntry);
 router.post('/lms/quizzes/:id/start', protect, requireRole('student'), lms.startQuiz);
 router.post('/lms/quizzes/:id/attempt', protect, requireRole('student'), lms.attemptQuiz);
 router.get('/lms/attempts/:id', protect, lms.getAttempt);
@@ -146,14 +165,15 @@ router.delete('/lms/announcements/:id', protect, teachRoles, lms.deleteAnnouncem
 
 // ---- NexoneZ Crew (employee portal) ----
 const crewUser = requireRole('admin', 'employee', 'intern');
+const noticeUser = requireRole('admin', 'employee', 'intern', 'student', 'teacher');
 router.get('/crew/home', protect, staffOnly, crew.home);
 router.get('/crew/leave-balance', protect, staffOnly, crew.myBalance);
 router.get('/crew/team', protect, crewUser, crew.team);
 router.patch('/crew/profile', protect, crewUser, crew.updateProfile);
-router.get('/crew/notices', protect, crewUser, crew.listNotices);
+router.get('/crew/notices', protect, noticeUser, crew.listNotices);
 router.post('/crew/notices', protect, adminOnly, crew.createNotice);
-router.post('/crew/notices/read-all', protect, staffOnly, crew.markAllRead);
-router.post('/crew/notices/:id/read', protect, crewUser, crew.markNoticeRead);
+router.post('/crew/notices/read-all', protect, noticeUser, crew.markAllRead);
+router.post('/crew/notices/:id/read', protect, noticeUser, crew.markNoticeRead);
 router.patch('/crew/notices/:id', protect, adminOnly, crew.updateNotice);
 router.delete('/crew/notices/:id', protect, adminOnly, crew.deleteNotice);
 router.get('/crew/tasks/mine', protect, staffOnly, crew.myTasks);

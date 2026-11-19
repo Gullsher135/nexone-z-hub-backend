@@ -8,7 +8,10 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "seed": "node src/seed/seed.js",
-    "seed:demo": "node src/seed/seed.js --demo"
+    "seed:demo": "node src/seed/seed.js --demo",
+    "backfill:logins": "node src/seed/backfillLogins.js",
+    "vapid": "web-push generate-vapid-keys",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"
@@ -24,7 +27,8 @@
     "helmet": "^7.2.0",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^8.24.7",
-    "morgan": "^1.12.1"
+    "morgan": "^1.12.1",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

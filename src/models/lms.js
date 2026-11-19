@@ -61,7 +61,9 @@ const storedFileSchema = new Schema(
     name: { type: String, required: true, maxlength: 160 },
     mime: { type: String, default: 'application/octet-stream', maxlength: 120 },
     size: { type: Number, required: true, min: 1 },
-    data: { type: Buffer, required: true },
+    storage: { type: String, enum: ['mongo', 's3'], default: 'mongo' }, // where the bytes live
+    key: { type: String }, // object key when storage is s3
+    data: { type: Buffer, required() { return this.storage !== 's3'; } }, // only for storage = mongo
     attached: { type: Boolean, default: false, index: true }, // false until it is saved on an assignment or submission
   },
   { timestamps: true }
@@ -185,6 +187,48 @@ const announcementSchema = new Schema(
   { timestamps: true }
 );
 
+// ---------- Presentations (one topic per student, marked on a rubric) ----------
+const rubricSchema = new Schema({
+  name: { type: String, required: true, trim: true, maxlength: 80 },
+  maxMarks: { type: Number, required: true, min: 1, max: 100 },
+});
+const presentationSchema = new Schema(
+  {
+    course: ref('Course', { required: true, index: true }),
+    title: { type: String, required: true, trim: true, maxlength: 160 },
+    description: { type: String, maxlength: 3000 },
+    date: { type: String, match: /^\d{4}-\d{2}-\d{2}$/ }, // YYYY-MM-DD
+    time: { type: String, match: /^\d{2}:\d{2}$/ }, // HH:MM
+    durationMin: { type: Number, default: 5, min: 1, max: 180 }, // per student
+    rubric: [rubricSchema], // what is marked, and out of how much
+    askSlides: { type: Boolean, default: true }, // students may upload their slides
+    published: { type: Boolean, default: true },
+    batches: [ref('Batch')], // empty = every batch of the course
+    createdBy: ref('User'),
+  },
+  { timestamps: true }
+);
+const presentationEntrySchema = new Schema(
+  {
+    presentation: ref('Presentation', { required: true, index: true }),
+    course: ref('Course', { required: true, index: true }),
+    student: ref('User', { required: true, index: true }),
+    topic: { type: String, trim: true, maxlength: 300 },
+    status: { type: String, enum: ['assigned', 'presented', 'absent'], default: 'assigned' },
+    scores: [new Schema({ criterion: { type: Schema.Types.ObjectId, required: true }, marks: { type: Number, min: 0 } }, { _id: false })],
+    total: { type: Number, default: 0 },
+    comment: { type: String, maxlength: 2000 },
+    slideFiles: [fileRefSchema],
+    slideLinks: [{ type: String, trim: true, maxlength: 600 }],
+    gradedAt: Date, // set once every criterion is marked, or the student is marked absent
+    gradedBy: ref('User'),
+  },
+  { timestamps: true }
+);
+presentationEntrySchema.index({ presentation: 1, student: 1 }, { unique: true });
+
+export const Presentation = mongoose.model('Presentation', presentationSchema);
+export const PresentationEntry = mongoose.model('PresentationEntry', presentationEntrySchema);
 export const StoredFile = mongoose.model('StoredFile', storedFileSchema);
 export const Course = mongoose.model('Course', courseSchema);
 export const Enrollment = mongoose.model('Enrollment', enrollmentSchema);

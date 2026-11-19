@@ -1,3 +1,4 @@
+import { audit } from '../utils/audit.js';
 import { Attendance } from '../models/Attendance.js';
 import { User, STAFF_ROLES } from '../models/User.js';
 import { Leave } from '../models/Leave.js';
@@ -198,6 +199,7 @@ export const manualEntry = asyncHandler(async (req, res) => {
   if (!user || !STAFF_ROLES.includes(user.role)) throw new HttpError(404, 'Employee or intern not found');
 
   let record = await Attendance.findOne({ user: user._id, date });
+  const before = record ? { checkIn: record.checkIn, checkOut: record.checkOut, status: record.status } : null;
   if (!record) record = new Attendance({ user: user._id, date });
 
   if (inT) {
@@ -220,12 +222,14 @@ export const manualEntry = asyncHandler(async (req, res) => {
   record.note = String(note).trim();
   record.editedBy = req.user._id;
   await record.save();
+  await audit(req, 'attendance.manual', { entity: 'Attendance', entityId: record._id, summary: `${user.name}: attendance for ${date} ${before ? 'changed' : 'added'} by hand`, details: { user: user._id, date, reason: record.note, before, after: { checkIn: record.checkIn, checkOut: record.checkOut, status: record.status } } });
   res.json({ record });
 });
 
 export const deleteRecord = asyncHandler(async (req, res) => {
   const rec = await Attendance.findById(req.params.id);
   if (!rec) throw new HttpError(404, 'Record not found');
+  await audit(req, 'attendance.delete', { entity: 'Attendance', entityId: rec._id, summary: `Attendance record of ${rec.date} deleted`, details: { user: rec.user, date: rec.date, checkIn: rec.checkIn, checkOut: rec.checkOut, status: rec.status } });
   await rec.deleteOne();
   res.json({ message: 'Deleted' });
 });

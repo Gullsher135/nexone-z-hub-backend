@@ -4,12 +4,12 @@ import { DATE_RE } from '../utils/time.js';
 const { Schema } = mongoose;
 const ref = (name, extra = {}) => ({ type: Schema.Types.ObjectId, ref: name, ...extra });
 
-// Company notices shown on every employee's home page.
+// Company notices. audience: all = all staff (employees + interns), everyone = staff + students + teachers.
 const noticeSchema = new Schema(
   {
     title: { type: String, required: true, trim: true, maxlength: 160 },
     body: { type: String, maxlength: 5000 },
-    audience: { type: String, enum: ['all', 'employee', 'intern'], default: 'all' },
+    audience: { type: String, enum: ['all', 'employee', 'intern', 'student', 'teacher', 'everyone'], default: 'all' },
     pinned: { type: Boolean, default: false },
     author: ref('User'),
     readBy: [Schema.Types.ObjectId],

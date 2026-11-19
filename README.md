@@ -1,11 +1,13 @@
 # NexoneZ Attendance System: Backend (API)
 
-Node.js, Express and MongoDB (Mongoose) REST API for tracking attendance of
-**employees, interns and students**.
+Node.js, Express and MongoDB (Mongoose) REST API behind the NexoneZ Hub: attendance, learning,
+fees and payroll, projects and letters.
 
 - **Employees and interns** log in, check in and check out (entry/exit time, late minutes, hours worked).
-- **Students** do not log in. The admin or instructor marks them present/absent per batch and day.
-- **Admin** registers everyone, corrects records, approves leave, sets office rules and exports reports.
+- **Students log in** to their own portal (`/learn`): courses, assignments, quizzes, presentations, fees and progress.
+- **Teachers** run their courses and batches, mark class attendance, quizzes, assignments and presentations.
+- **Admin** registers everyone, corrects records, approves leave, runs fees and payroll, and can read the audit log.
+- **Class attendance** is taken on Saturday and Sunday only (`CLASS_DAYS` in `src/utils/time.js`).
 - All dates and times use **Pakistan time (Asia/Karachi)**.
 
 ## Run locally
@@ -19,6 +21,12 @@ npm run dev               # http://localhost:5000
 On first start, if no admin exists, one is created from `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 Optional demo data: `npm run seed:demo`.
 
+Automated tests (fees, payroll, date rules and the file-storage signing) need no database:
+
+```bash
+npm test
+```
+
 ## Deploy on Render
 
 1. Push this folder to its own GitHub repo.
@@ -30,6 +38,23 @@ Optional demo data: `npm run seed:demo`.
    - `CLIENT_URL`: your Vercel URL, e.g. `https://nexonez-attendance.vercel.app` (comma-separate several; no trailing slash)
    - `ADMIN_NAME`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`: first admin account
 5. Free Render services sleep after inactivity, so the first request after a break can take about 30-50 seconds.
+   To avoid it, create a free monitor at UptimeRobot or cron-job.org that opens `https://YOUR-API.onrender.com/api/health` every 10 minutes.
+
+## File storage (assignments, submissions, slides)
+
+By default uploaded files are kept in MongoDB, which is fine for trying things out but fills the free Atlas plan (512 MB) quickly.
+For real use, point the app at free S3-compatible object storage by filling these variables; nothing else changes:
+
+| Variable | Example (Backblaze B2) |
+|---|---|
+| `S3_ENDPOINT` | `https://s3.us-west-004.backblazeb2.com` |
+| `S3_REGION` | `us-west-004` |
+| `S3_BUCKET` | `nexonez-files` (keep the bucket **private**) |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | an Application Key limited to that bucket |
+
+Backblaze B2 gives 10 GB free. Cloudflare R2 (10 GB free, needs a card on file) and other S3-compatible services work the same way.
+Downloads still go through the API, so only logged-in people allowed to see a file can get it. Files already stored in MongoDB keep working;
+new uploads go to the bucket. The server prints which storage it uses when it starts. Any file type is accepted, up to 10 MB each.
 
 ## Check-in methods
 
@@ -56,10 +81,24 @@ To set the office location from anywhere: open **Settings, Office location check
 | Batches (admin) | `GET/POST /batches`, `PATCH/DELETE /batches/:id` |
 | Staff attendance | `GET /attendance/today`, `GET /attendance/me?month=`, `POST /attendance/check-in`, `/check-out`, `/punch` |
 | Staff attendance (admin) | `GET /attendance/qr`, `GET /attendance/board?date=`, `POST /attendance/manual`, `DELETE /attendance/:id` |
-| Student attendance (admin) | `GET/PUT /student-attendance?batch=&date=`, `GET /student-attendance/summary?batch=&month=`, `GET /student-attendance/student/:id` |
+| Student attendance (admin, teacher) | `GET/PUT /student-attendance?batch=&date=` (Saturday and Sunday only), `GET /student-attendance/summary?batch=&month=`, `GET /student-attendance/student/:id` |
 | Leaves | staff: `POST /leaves`, `GET /leaves/me`, `DELETE /leaves/:id`; admin: `GET /leaves`, `PATCH /leaves/:id/review` |
 | Reports (admin) | `GET /reports/dashboard`, `/reports/summary?month=`, `/reports/user/:id?month=`, `/reports/export?month=&detail=daily` (CSV) |
 | Settings | `GET /settings`, `PUT /settings` (admin): weekend days, holidays, office location, allowed IPs, QR only; `GET /settings/my-ip`; `POST /settings/resolve-map` (Google Maps link to coordinates) |
+
+## Learning (`/api/lms/*`)
+
+| Area | Endpoints |
+|---|---|
+| Assignments | per course and batch; students hand in files (any format), links and a note; teacher attachments |
+| Quizzes | `kind` daily (multiple choice, automatic) or weekly (sections with multiple choice, true/false, short answer and coding questions); optional timer; written answers are marked by the teacher (`PATCH /lms/attempts/:id/grade`) |
+| Presentations | per course and batch: a topic for every student (by hand or random), a marking list with marks for each item, optional slides upload |
+| Files | `POST /lms/files` (raw bytes), `GET /lms/files/:id` |
+
+## Audit log (admin)
+
+`GET /api/audit?action=payment&from=&to=&page=` lists who changed fee plans, payments, salaries, payroll, payslips, manual
+attendance, marks and grades, and account access, with before and after values. Entries are only ever added.
 
 ## Notes
 
