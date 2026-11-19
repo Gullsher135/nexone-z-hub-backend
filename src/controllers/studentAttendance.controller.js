@@ -1,4 +1,3 @@
-import { pushTo } from '../utils/push.js';
 import { audit } from '../utils/audit.js';
 import { StudentAttendance } from '../models/StudentAttendance.js';
 import { User } from '../models/User.js';
@@ -81,7 +80,6 @@ export const saveSheet = asyncHandler(async (req, res) => {
   const had = await StudentAttendance.exists({ batch: b._id, date });
   if (ops.length) await StudentAttendance.bulkWrite(ops);
   await audit(req, 'studentAttendance.save', { entity: 'StudentAttendance', entityId: b._id, summary: `Class attendance for ${b.name} on ${date} ${had ? 're-saved (replaced)' : 'saved'}: ${ops.length} students`, details: { batch: b._id, date, replaced: !!had, absent: records.filter((r) => r.status === 'absent').length } });
-  pushTo(records.filter((r) => r.status === 'absent').map((r) => r.student), { title: 'Marked absent', body: `You were marked absent in ${b.name} on ${date}.`, url: '/learn', tag: `abs-${date}` }, { exceptId: req.user._id });
   res.json({ message: 'Attendance saved', saved: ops.length });
 });
 

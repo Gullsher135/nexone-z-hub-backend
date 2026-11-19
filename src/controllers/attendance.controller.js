@@ -1,4 +1,3 @@
-import { pushTo } from '../utils/push.js';
 import { audit } from '../utils/audit.js';
 import { Attendance } from '../models/Attendance.js';
 import { User, STAFF_ROLES } from '../models/User.js';
@@ -224,7 +223,6 @@ export const manualEntry = asyncHandler(async (req, res) => {
   record.editedBy = req.user._id;
   await record.save();
   await audit(req, 'attendance.manual', { entity: 'Attendance', entityId: record._id, summary: `${user.name}: attendance for ${date} ${before ? 'changed' : 'added'} by hand`, details: { user: user._id, date, reason: record.note, before, after: { checkIn: record.checkIn, checkOut: record.checkOut, status: record.status } } });
-  pushTo([user._id], { title: 'Attendance updated', body: `Your attendance for ${date} was corrected by the admin.`, url: '/time/history', tag: `att-${date}` }, { exceptId: req.user._id });
   res.json({ record });
 });
 

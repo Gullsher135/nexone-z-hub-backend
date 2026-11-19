@@ -1,7 +1,6 @@
 import { Leave } from '../models/Leave.js';
 import { HttpError, asyncHandler } from '../utils/helpers.js';
 import { DATE_RE, addDays, dateKey } from '../utils/time.js';
-import { notifyRoles, pushSafe, pushTo } from '../utils/push.js';
 
 export const createLeave = asyncHandler(async (req, res) => {
   const { type, fromDate, toDate, reason } = req.body || {};
@@ -21,7 +20,6 @@ export const createLeave = asyncHandler(async (req, res) => {
   if (overlap) throw new HttpError(409, 'You already have a leave request covering these dates');
 
   const leave = await Leave.create({ user: req.user._id, type, fromDate, toDate, reason: reason.trim() });
-  pushSafe(notifyRoles(['admin'], { title: 'New leave request', body: `${req.user.name}: ${fromDate} to ${toDate}`, url: '/admin/leaves', tag: `leave-${leave._id}` }));
   res.status(201).json({ leave });
 });
 
@@ -60,6 +58,5 @@ export const reviewLeave = asyncHandler(async (req, res) => {
   leave.reviewedBy = req.user._id;
   leave.reviewedAt = new Date();
   await leave.save();
-  pushTo([leave.user], { title: `Leave ${status}`, body: `${leave.fromDate} to ${leave.toDate}${reviewNote ? ` - ${reviewNote}` : ''}`.slice(0, 140), url: '/time/leaves', tag: `leave-${leave._id}` });
   res.json({ leave, today: dateKey() });
 });

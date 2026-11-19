@@ -1,4 +1,3 @@
-import { pushTo } from '../utils/push.js';
 import crypto from 'crypto';
 import { Letter, SEVERITY } from '../models/docs.js';
 import { Project, WorkItem } from '../models/flow.js';
@@ -91,8 +90,6 @@ export const createLetter = asyncHandler(async (req, res) => {
     type: b.type, user: u._id, person: { name: u.name, code: u.code, designation: u.designation, role: u.role },
     data, issuedBy: req.user._id,
   });
-  const kind = { warning: 'warning letter', internship: 'internship certificate', experience: 'experience letter' }[b.type];
-  pushTo([u._id], { title: b.type === 'warning' ? 'You received a warning letter' : `Your ${kind} is ready`, body: b.type === 'warning' ? data.subject : 'Open Letters to view and download it.', url: '/letters', tag: `letter-${letter._id}` });
   res.status(201).json({ letter });
 });
 
@@ -127,7 +124,6 @@ export const revokeLetter = asyncHandler(async (req, res) => {
   l.revokedReason = reason.slice(0, 300);
   l.revokedAt = new Date();
   await l.save();
-  pushTo([l.user], { title: 'A letter was withdrawn', body: reason.slice(0, 140), url: '/letters', tag: `letter-${l._id}` });
   res.json({ letter: l });
 });
 
@@ -139,7 +135,6 @@ export const acknowledge = asyncHandler(async (req, res) => {
   l.acknowledgedAt = new Date();
   l.reply = String(req.body?.reply || '').trim().slice(0, 1500) || undefined;
   await l.save();
-  pushTo([l.issuedBy], { title: 'Warning acknowledged', body: `${l.person?.name || 'Employee'} acknowledged the warning.`, url: '/admin/crew/letters', tag: `letter-${l._id}` });
   res.json({ letter: l });
 });
 

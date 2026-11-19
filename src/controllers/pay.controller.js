@@ -1,4 +1,3 @@
-import { pushTo } from '../utils/push.js';
 import { FeeAccount, Payment, SalaryProfile, Payslip } from '../models/pay.js';
 import { audit } from '../utils/audit.js';
 import { User, STAFF_ROLES } from '../models/User.js';
@@ -113,7 +112,6 @@ export const addPayment = asyncHandler(async (req, res) => {
   const n = await nextSeq('receipt');
   const p = await Payment.create({ receiptNo: `RCPT-${String(n).padStart(5, '0')}`, student: student._id, amount, date, method, reference: req.body.reference, note: req.body.note, receivedBy: req.user._id });
   await audit(req, 'payment.add', { entity: 'Payment', entityId: p._id, summary: `Rs ${amount} received from ${student.name} (${p.receiptNo})`, details: { student: student._id, amount, method, date, reference: req.body.reference } });
-  pushTo([student._id], { title: 'Fee payment received', body: `Rs ${amount} received. Receipt ${p.receiptNo}.`, url: '/learn/fees', tag: `pay-${p._id}` });
   res.status(201).json({ payment: p });
 });
 
@@ -239,7 +237,6 @@ export const payPayslip = asyncHandler(async (req, res) => {
   slip.method = METHODS.includes(req.body?.method) ? req.body.method : 'bank';
   await slip.save();
   await audit(req, 'payslip.pay', { entity: 'Payslip', entityId: slip._id, summary: `Payslip ${slip.month} marked paid: Rs ${slip.net} by ${slip.method}`, details: { user: slip.user, net: slip.net, method: slip.method } });
-  pushTo([slip.user], { title: 'Salary paid', body: `Your salary for ${slip.month} (Rs ${slip.net}) has been paid.`, url: '/payslips', tag: `slip-${slip._id}` });
   res.json({ payslip: slip });
 });
 

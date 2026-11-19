@@ -1,4 +1,4 @@
-import { sendPush, pushTo } from '../utils/push.js';
+import { sendPush } from '../utils/push.js';
 import { audit } from '../utils/audit.js';
 import crypto from 'crypto';
 import { Course, Enrollment, Assignment, Submission, Quiz, QuizAttempt, Announcement, StoredFile, Presentation, PresentationEntry } from '../models/lms.js';
@@ -59,17 +59,6 @@ async function batchFor(course, enrollment, user) {
   const b = await Batch.findById(bid).select('courseId').lean();
   return b && (!b.courseId || sid(b.courseId) === sid(course._id)) ? sid(bid) : null;
 }
-
-// Enrolled students who should hear about an item: the whole course, or only the listed batches.
-export async function audienceIds(course, batches = []) {
-  const enr = await Enrollment.find({ course: course._id }).select('student batch').lean();
-  if (!batches?.length) return enr.map((e) => e.student);
-  const want = new Set(batches.map(sid));
-  const users = await User.find({ _id: { $in: enr.map((e) => e.student) } }).select('batch').lean();
-  const own = new Map(users.map((u) => [sid(u._id), u.batch]));
-  return enr.filter((e) => { const b = e.batch || own.get(sid(e.student)); return b && want.has(sid(b)); }).map((e) => e.student);
-}
-const later = (fn) => fn().catch((e) => console.error('push failed', e.message));
 
 // Which batches an assignment or quiz is for. An empty list means every batch of the course.
 async function cleanBatches(course, raw) {
@@ -232,12 +221,10 @@ export const enroll = asyncHandler(async (req, res) => {
   if (!ids.size) throw new HttpError(400, 'Choose at least one student or a batch');
   const students = await User.find({ _id: { $in: [...ids] }, role: 'student' }).select('_id');
   let added = 0;
-  const newIds = [];
   for (const s of students) {
     const r = await Enrollment.updateOne({ course: course._id, student: s._id }, { $setOnInsert: { course: course._id, student: s._id, completedLessons: [] } }, { upsert: true });
-    if (r.upsertedCount) { added++; newIds.push(s._id); }
+    if (r.upsertedCount) added++;
   }
-  pushTo(newIds, { title: 'You were enrolled in a course', body: course.title, url: `/learn/course/${course._id}`, tag: `enr-${course._id}` });
   res.json({ added, skipped: students.length - added });
 });
 
@@ -277,11 +264,7 @@ export const setProgress = asyncHandler(async (req, res) => {
   const complete = all.length > 0 && all.every((l) => set.has(l));
   enrollment.completedAt = complete ? enrollment.completedAt || new Date() : undefined;
   await enrollment.save();
-  if (complete && course.autoCertificate) {
-    const had = enrollment.certificate?.code;
-    await issueCertificate(enrollment);
-    if (!had) pushTo([req.user._id], { title: 'Certificate ready', body: `You completed ${course.title}.`, url: '/learn/certificates', tag: `cert-${course._id}` });
-  }
+  if (complete && course.autoCertificate) await issueCertificate(enrollment);
   const overall = (await computeProgress([{ course, enrollment, student: req.user }])).get(progressKey(course, req.user))?.overall ?? 0;
   res.json({ progress: overall, lessons: { done: set.size, total: all.length, percent: percent(set.size, all.length) }, completedAt: enrollment.completedAt, certificate: enrollment.certificate?.code ? enrollment.certificate : undefined });
 });
@@ -291,9 +274,7 @@ export const issueManual = asyncHandler(async (req, res) => {
   const e = await Enrollment.findOne({ course: course._id, student: req.params.studentId });
   if (!e) throw new HttpError(404, 'Student is not enrolled');
   e.completedAt = e.completedAt || new Date();
-  const had = e.certificate?.code;
   const cert = await issueCertificate(e);
-  if (!had) pushTo([e.student], { title: 'Certificate ready', body: `Your certificate for ${course.title} is ready.`, url: '/learn/certificates', tag: `cert-${course._id}` });
   res.json({ certificate: cert });
 });
 
@@ -372,7 +353,6 @@ export const createAssignment = asyncHandler(async (req, res) => {
   const plan = await planFiles(req.body.attachmentIds, { course: course._id, owner: req.user._id, kind: 'assignment' });
   const a = await Assignment.create({ ...data, batches, attachments: plan.refs, course: course._id, createdBy: req.user._id });
   await applyPlan(plan);
-  later(async () => pushTo(await audienceIds(course, batches), { title: `New assignment: ${a.title}`.slice(0, 80), body: `${course.title}${a.dueDate ? ` - due ${a.dueDate}` : ''}`, url: `/learn/course/${course._id}`, tag: `asg-${a._id}` }));
   res.status(201).json({ assignment: a });
 });
 
@@ -428,7 +408,6 @@ export const submitAssignment = asyncHandler(async (req, res) => {
   Object.assign(sub, { text, links, link: links[0] || '', files: plan.refs, late, submittedAt: new Date() });
   await sub.save();
   await applyPlan(plan);
-  if (!existing) pushTo([...(course.instructors || []), a.createdBy], { title: 'New submission', body: `${req.user.name} submitted "${a.title}"${late ? ' (late)' : ''}`, url: `/teach/${course._id}`, adminUrl: `/admin/learn/${course._id}`, tag: `sub-${a._id}` });
   res.status(existing ? 200 : 201).json({ submission: sub });
 });
 
@@ -451,7 +430,6 @@ export const gradeSubmission = asyncHandler(async (req, res) => {
   Object.assign(sub, { grade, feedback: req.body.feedback || '', gradedAt: new Date(), gradedBy: req.user._id });
   await sub.save();
   await audit(req, 'grade.assignment', { entity: 'Submission', entityId: sub._id, summary: `Assignment "${a.title}" marked ${grade}/${a.maxPoints}${before !== null ? ` (was ${before})` : ''}`, details: { student: sub.student, assignment: a._id, before, after: grade } });
-  pushTo([sub.student], { title: 'Assignment marked', body: `${a.title}: ${grade}/${a.maxPoints}`, url: `/learn/course/${sub.course}`, tag: `grade-${sub._id}` });
   res.json({ submission: sub });
 });
 
@@ -572,7 +550,6 @@ export const createQuiz = asyncHandler(async (req, res) => {
     maxAttempts: req.body.maxAttempts ?? 1, published: req.body.published !== false,
     questions: cleanQuestions(req.body.questions, settings.kind), createdBy: req.user._id,
   });
-  if (quiz.published) later(async () => pushTo(await audienceIds(course, batches), { title: `New quiz: ${quiz.title}`.slice(0, 80), body: course.title, url: `/learn/course/${course._id}`, tag: `quiz-${quiz._id}` }));
   res.status(201).json({ quiz });
 });
 
@@ -767,7 +744,6 @@ export const gradeAttempt = asyncHandler(async (req, res) => {
   attempt.markModified('responses');
   await attempt.save();
   await audit(req, 'grade.quiz', { entity: 'QuizAttempt', entityId: attempt._id, summary: `Quiz "${quiz.title}" marked: ${attempt.score}/${attempt.maxScore}${before !== attempt.score ? ` (was ${before})` : ''}`, details: { student: attempt.student, quiz: quiz._id, before, after: attempt.score, status: attempt.status } });
-  if (attempt.status === 'graded') pushTo([attempt.student], { title: 'Quiz result ready', body: `${quiz.title}: ${attempt.score}/${attempt.maxScore}`, url: `/learn/course/${attempt.course}`, tag: `qres-${attempt._id}` });
   res.json({ attempt });
 });
 

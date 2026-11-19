@@ -3,8 +3,7 @@ import mongoose from 'mongoose';
 import { Presentation, PresentationEntry, Enrollment } from '../models/lms.js';
 import { User } from '../models/User.js';
 import { Batch } from '../models/Batch.js';
-import { courseAccess, batchFor, cleanBatches, withBatchNames, planFiles, applyPlan, cleanLinks, audienceIds } from './lms.controller.js';
-import { pushTo } from '../utils/push.js';
+import { courseAccess, batchFor, cleanBatches, withBatchNames, planFiles, applyPlan, cleanLinks } from './lms.controller.js';
 import { deleteStoredFiles } from '../utils/fileStore.js';
 import { audit } from '../utils/audit.js';
 import { DATE_RE } from '../utils/time.js';
@@ -113,7 +112,6 @@ export const createPresentation = asyncHandler(async (req, res) => {
   const { course } = await courseAccess(req);
   if (!req.body?.title?.trim()) throw new HttpError(400, 'Title is required');
   const p = await Presentation.create({ ...presentationFields(req.body), rubric: cleanRubric(req.body.rubric), batches: await cleanBatches(course, req.body.batches), course: course._id, createdBy: req.user._id });
-  if (p.published) audienceIds(course, p.batches).then((ids) => pushTo(ids, { title: `New presentation: ${p.title}`.slice(0, 80), body: course.title, url: `/learn/course/${course._id}`, tag: `pres-${p._id}` })).catch((e) => console.error('push failed', e.message));
   res.status(201).json({ presentation: p });
 });
 
@@ -178,7 +176,6 @@ export const setTopics = asyncHandler(async (req, res) => {
     return { updateOne: { filter: { presentation: p._id, student: t.student }, update: { $set: { topic: String(t.topic || '').trim().slice(0, 300) } } } };
   });
   if (ops.length) await PresentationEntry.bulkWrite(ops);
-  pushTo(list.filter((t) => String(t.topic || '').trim()).map((t) => t.student), { title: 'Your presentation topic', body: `${p.title}: open the course to see your topic.`, url: `/learn/course/${p.course}`, tag: `topic-${p._id}` });
   res.json({ updated: ops.length });
 });
 
@@ -196,7 +193,6 @@ export const autoAssign = asyncHandler(async (req, res) => {
   for (let i = pool.length - 1; i > 0; i -= 1) { const j = crypto.randomInt(i + 1); [pool[i], pool[j]] = [pool[j], pool[i]]; } // fair shuffle
   const n = Math.min(rows.length, pool.length);
   if (n) await PresentationEntry.bulkWrite(rows.slice(0, n).map((r, i) => ({ updateOne: { filter: { _id: r._id }, update: { $set: { topic: pool[i] } } } })));
-  pushTo(rows.slice(0, n).map((r) => r.student), { title: 'Your presentation topic', body: `${p.title}: open the course to see your topic.`, url: `/learn/course/${p.course}`, tag: `topic-${p._id}` });
   res.json({ assigned: n, withoutTopic: Math.max(0, rows.length - n), unusedTopics: Math.max(0, pool.length - n) });
 });
 
@@ -235,7 +231,6 @@ export const gradeEntry = asyncHandler(async (req, res) => {
   e.gradedBy = req.user._id;
   await e.save();
   await audit(req, 'grade.presentation', { entity: 'PresentationEntry', entityId: e._id, summary: `Presentation "${p.title}": ${status === 'absent' ? 'marked absent' : `marked ${total}/${maxTotal(p)}`}${beforeTotal !== null ? ` (was ${beforeTotal})` : ''}`, details: { student: e.student, presentation: p._id, status, before: beforeTotal, after: total } });
-  if (e.gradedAt) pushTo([e.student], { title: 'Presentation marked', body: status === 'absent' ? `${p.title}: marked absent` : `${p.title}: ${total}/${maxTotal(p)}`, url: `/learn/course/${p.course}`, tag: `pgrade-${e._id}` });
   res.json({ entry: e });
 });
 

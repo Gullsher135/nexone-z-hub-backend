@@ -1,7 +1,6 @@
 import crypto from 'crypto';
 import { Client, Project, WorkItem, PROJECT_STATUS, ITEM_STATUS } from '../models/flow.js';
 import { User } from '../models/User.js';
-import { pushTo } from '../utils/push.js';
 import { nextSeq } from '../models/Counter.js';
 import { HttpError, asyncHandler, pick } from '../utils/helpers.js';
 import { DATE_RE, dateKey } from '../utils/time.js';
@@ -123,7 +122,6 @@ export const createProject = asyncHandler(async (req, res) => {
     name: b.name.trim(), description: b.description, client: b.client || undefined, status: b.status || 'planning',
     startDate, dueDate, budget: Math.max(0, Number(b.budget) || 0), lead: b.lead || undefined, members, createdBy: req.user._id,
   });
-  pushTo([...(p.members || []), p.lead], { title: 'You were added to a project', body: p.name, url: `/flow/projects/${p._id}`, adminUrl: `/admin/flow/projects/${p._id}`, tag: `prj-${p._id}` }, { exceptId: req.user._id });
   res.status(201).json({ project: p });
 });
 
@@ -243,7 +241,6 @@ export const createItem = asyncHandler(async (req, res) => {
   const item = new WorkItem({ ...data, project: p._id, createdBy: req.user._id });
   note(item, req.user, 'created this card');
   await item.save();
-  pushTo([item.assignee], { title: 'New card assigned to you', body: `${item.title} (${p.name})`.slice(0, 140), url: `/flow/projects/${p._id}`, adminUrl: `/admin/flow/projects/${p._id}`, tag: `card-${item._id}` }, { exceptId: req.user._id });
   res.status(201).json({ item });
 });
 
@@ -289,7 +286,6 @@ export const updateItem = asyncHandler(async (req, res) => {
   Object.assign(item, await itemInput(body, p, true, item));
   await describeChanges(item, before, req.user, p);
   await item.save();
-  if (item.assignee && before.assignee !== sid(item.assignee)) pushTo([item.assignee], { title: 'Card assigned to you', body: `${item.title} (${p.name})`.slice(0, 140), url: `/flow/projects/${p._id}`, adminUrl: `/admin/flow/projects/${p._id}`, tag: `card-${item._id}` }, { exceptId: req.user._id });
   res.json({ item });
 });
 
@@ -314,7 +310,6 @@ export const setItemStatus = asyncHandler(async (req, res) => {
   item.status = status;
   item.completedAt = status === 'done' ? new Date() : undefined;
   await item.save();
-  pushTo([item.assignee, p.lead, item.createdBy], { title: `Card moved to ${COLUMN_LABEL[status]}`, body: `${req.user.name}: ${item.title}`.slice(0, 140), url: `/flow/projects/${p._id}`, adminUrl: `/admin/flow/projects/${p._id}`, tag: `card-${item._id}` }, { exceptId: req.user._id });
   res.json({ item });
 });
 
@@ -327,7 +322,6 @@ export const commentItem = asyncHandler(async (req, res) => {
   if (!isMember(p, req.user)) throw new HttpError(403, 'You are not part of this project');
   item.comments.push({ author: req.user._id, text: text.slice(0, 1000) });
   await item.save();
-  pushTo([item.assignee, p.lead, item.createdBy, ...item.comments.map((c) => c.author)], { title: `Comment on "${item.title}"`.slice(0, 60), body: `${req.user.name}: ${text}`.slice(0, 140), url: `/flow/projects/${p._id}`, adminUrl: `/admin/flow/projects/${p._id}`, tag: `cmt-${item._id}` }, { exceptId: req.user._id });
   res.status(201).json({ item });
 });
 

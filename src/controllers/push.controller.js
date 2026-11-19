@@ -29,5 +29,5 @@ export const unsubscribe = asyncHandler(async (req, res) => {
 export const test = asyncHandler(async (req, res) => {
   if (!pushEnabled()) throw new HttpError(400, 'Push is not set up on the server yet');
   const r = await sendPush([req.user._id], { title: 'NexoneZ Hub', body: 'Notifications are working.', url: '/', tag: 'test' });
-  res.json({ sent: r.sent, devices: r.devices ?? 0, errors: r.errors || [] });
+  res.json({ sent: r.sent });
 });
