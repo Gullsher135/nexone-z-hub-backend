@@ -26,18 +26,21 @@ export async function sendPush(userIds, payload) {
   const subs = await PushSubscription.find({ user: { $in: userIds } }).lean();
   const body = JSON.stringify(payload);
   let sent = 0;
+  const errors = [];
   await Promise.all(
     subs.map(async (s) => {
       try {
         await webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, body, { TTL: 60 * 60 * 24, urgency: 'high' });
         sent += 1;
       } catch (e) {
+        errors.push(`${e.statusCode || ''} ${String(e.body || e.message).slice(0, 120)}`.trim());
         if (e.statusCode === 404 || e.statusCode === 410) await PushSubscription.deleteOne({ _id: s._id });
-        else console.error('push error', e.statusCode || e.message);
+        else console.error('push error', e.statusCode || e.message, String(e.body || '').slice(0, 200));
       }
     })
   );
-  return { sent };
+  console.log(`push "${payload.title}": ${userIds.length} user(s), ${subs.length} device(s), ${sent} delivered`);
+  return { sent, devices: subs.length, errors };
 }
 
 // One-line helper for every feature: tell these people (never the person who did it), never throw.
