@@ -5,7 +5,7 @@ import { User, STAFF_ROLES } from '../models/User.js';
 import { getSettings } from '../models/Setting.js';
 import { HttpError, asyncHandler, pick } from '../utils/helpers.js';
 import { DATE_RE, dateKey, datesBetween, weekdayOfKey } from '../utils/time.js';
-import { notifyRoles } from '../utils/push.js';
+import { notifyRoles, pushSafe, pushTo } from '../utils/push.js';
 
 const isAdmin = (u) => u.role === 'admin';
 const sid = (v) => String(v?._id || v);
@@ -150,6 +150,7 @@ export const createTask = asyncHandler(async (req, res) => {
   const d = pick(req.body, TASK_FIELDS);
   checkTask(d);
   const t = await Task.create({ ...d, assignee: person._id, createdBy: req.user._id });
+  pushTo([person._id], { title: 'New task assigned', body: t.title.slice(0, 140), url: '/tasks', tag: `task-${t._id}` }, { exceptId: req.user._id });
   res.status(201).json({ task: t });
 });
 
@@ -163,6 +164,7 @@ export const updateTask = asyncHandler(async (req, res) => {
     const person = await User.findOne({ _id: req.body.assignee, role: { $in: STAFF_ROLES }, isActive: true });
     if (!person) throw new HttpError(400, 'Choose an active employee or intern');
     t.assignee = person._id;
+    pushTo([person._id], { title: 'Task assigned to you', body: t.title.slice(0, 140), url: '/tasks', tag: `task-${t._id}` }, { exceptId: req.user._id });
   }
   await t.save();
   res.json({ task: t });
@@ -190,6 +192,8 @@ export const setTaskStatus = asyncHandler(async (req, res) => {
   t.status = status;
   t.completedAt = status === 'done' ? t.completedAt || new Date() : undefined;
   await t.save();
+  const label = { todo: 'To do', doing: 'In progress', done: 'Done' }[status];
+  pushTo([t.assignee, t.createdBy], { title: `Task: ${label}`, body: `${req.user.name}: ${t.title}`.slice(0, 140), url: '/tasks', adminUrl: '/admin/crew/tasks', tag: `task-${t._id}` }, { exceptId: req.user._id });
   res.json({ task: t });
 });
 
@@ -199,6 +203,7 @@ export const commentTask = asyncHandler(async (req, res) => {
   if (!text) throw new HttpError(400, 'Write a comment');
   t.comments.push({ author: req.user._id, text: text.slice(0, 1000) });
   await t.save();
+  pushTo([t.assignee, t.createdBy], { title: `New comment on "${t.title}"`.slice(0, 60), body: `${req.user.name}: ${text}`.slice(0, 140), url: '/tasks', adminUrl: '/admin/crew/tasks', tag: `task-${t._id}` }, { exceptId: req.user._id });
   res.status(201).json({ task: t });
 });
 
