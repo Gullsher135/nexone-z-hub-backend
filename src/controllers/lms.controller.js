@@ -1,4 +1,4 @@
-import { sendPush } from '../utils/push.js';
+import { notifyUsers } from '../utils/push.js';
 import { audit } from '../utils/audit.js';
 import crypto from 'crypto';
 import { Course, Enrollment, Assignment, Submission, Quiz, QuizAttempt, Announcement, StoredFile, Presentation, PresentationEntry } from '../models/lms.js';
@@ -48,6 +48,18 @@ async function access(req, id = req.params.id) {
 }
 
 export { access as courseAccess };
+
+// Students of a course who can see an item (every batch, or only the batches the item is limited to).
+async function courseStudents(courseId, item) {
+  try {
+    const ens = await Enrollment.find({ course: courseId }).select('student batch').lean();
+    return ens.filter((e) => visibleForBatch(item || {}, e.batch)).map((e) => e.student);
+  } catch (e) {
+    console.error('could not list students', e.message);
+    return [];
+  }
+}
+const learnUrl = (courseId) => ({ student: `/learn/course/${courseId}` });
 export { batchFor, cleanBatches, withBatchNames, planFiles, applyPlan, cleanLinks }; // shared with the presentation module
 
 // The batch a student sits in for this course: their own enrolment first, then their general batch.
@@ -221,10 +233,12 @@ export const enroll = asyncHandler(async (req, res) => {
   if (!ids.size) throw new HttpError(400, 'Choose at least one student or a batch');
   const students = await User.find({ _id: { $in: [...ids] }, role: 'student' }).select('_id');
   let added = 0;
+  const newly = [];
   for (const s of students) {
     const r = await Enrollment.updateOne({ course: course._id, student: s._id }, { $setOnInsert: { course: course._id, student: s._id, completedLessons: [] } }, { upsert: true });
-    if (r.upsertedCount) added++;
+    if (r.upsertedCount) { added++; newly.push(s._id); }
   }
+  notifyUsers(newly, { email: true, title: `You were enrolled in ${course.title}`, body: 'Open NexoneZ Learn to start.', tag: `enrol-${course._id}`, urls: learnUrl(course._id) });
   res.json({ added, skipped: students.length - added });
 });
 
@@ -243,6 +257,7 @@ async function issueCertificate(enrollment) {
     try {
       enrollment.certificate = { code: certCode(), issuedAt: new Date() };
       await enrollment.save();
+      notifyUsers([enrollment.student], { email: true, title: 'Your certificate is ready', body: 'Congratulations on completing the course.', tag: `cert-${enrollment._id}`, urls: { student: '/learn/certificates' } });
       return enrollment.certificate;
     } catch (e) {
       if (e.code !== 11000) throw e;
@@ -353,6 +368,7 @@ export const createAssignment = asyncHandler(async (req, res) => {
   const plan = await planFiles(req.body.attachmentIds, { course: course._id, owner: req.user._id, kind: 'assignment' });
   const a = await Assignment.create({ ...data, batches, attachments: plan.refs, course: course._id, createdBy: req.user._id });
   await applyPlan(plan);
+  courseStudents(course._id, a).then((ids) => notifyUsers(ids, { email: true, title: `New assignment: ${a.title}`, body: `${course.title}${a.dueDate ? ` · due ${a.dueDate}` : ''}`, tag: `asg-${a._id}`, urls: learnUrl(course._id) }));
   res.status(201).json({ assignment: a });
 });
 
@@ -429,6 +445,7 @@ export const gradeSubmission = asyncHandler(async (req, res) => {
   const before = sub.gradedAt ? sub.grade : null;
   Object.assign(sub, { grade, feedback: req.body.feedback || '', gradedAt: new Date(), gradedBy: req.user._id });
   await sub.save();
+  notifyUsers([sub.student], { email: true, title: `Assignment marked: ${a.title}`, body: `You got ${grade} out of ${a.maxPoints}`, tag: `grade-${sub._id}`, urls: learnUrl(sub.course) });
   await audit(req, 'grade.assignment', { entity: 'Submission', entityId: sub._id, summary: `Assignment "${a.title}" marked ${grade}/${a.maxPoints}${before !== null ? ` (was ${before})` : ''}`, details: { student: sub.student, assignment: a._id, before, after: grade } });
   res.json({ submission: sub });
 });
@@ -550,6 +567,7 @@ export const createQuiz = asyncHandler(async (req, res) => {
     maxAttempts: req.body.maxAttempts ?? 1, published: req.body.published !== false,
     questions: cleanQuestions(req.body.questions, settings.kind), createdBy: req.user._id,
   });
+  if (quiz.published) courseStudents(course._id, quiz).then((ids) => notifyUsers(ids, { email: true, title: `New ${quiz.kind === 'weekly' ? 'weekly quiz' : 'quiz'}: ${quiz.title}`, body: `${course.title}${quiz.timeLimit ? ` · ${quiz.timeLimit} minutes` : ''}`, tag: `quiz-${quiz._id}`, urls: learnUrl(course._id) }));
   res.status(201).json({ quiz });
 });
 
@@ -584,6 +602,7 @@ export const getQuiz = asyncHandler(async (req, res) => {
 export const updateQuiz = asyncHandler(async (req, res) => {
   const { quiz, manage, course } = await ownQuiz(req);
   if (!manage) throw new HttpError(403, 'Not allowed');
+  const wasPublished = quiz.published;
   Object.assign(quiz, pick(req.body, ['title', 'description', 'maxAttempts', 'published']), quizSettings(req.body));
   if (req.body.batches !== undefined) quiz.batches = await cleanBatches(course, req.body.batches);
   if (req.body.questions) {
@@ -600,6 +619,7 @@ export const updateQuiz = asyncHandler(async (req, res) => {
     quiz.questions = next;
   }
   await quiz.save();
+  if (!wasPublished && quiz.published) courseStudents(course._id, quiz).then((ids) => notifyUsers(ids, { email: true, title: `New quiz: ${quiz.title}`, body: course.title, tag: `quiz-${quiz._id}`, urls: learnUrl(course._id) }));
   res.json({ quiz });
 });
 
@@ -743,6 +763,7 @@ export const gradeAttempt = asyncHandler(async (req, res) => {
   Object.assign(attempt, { gradedAt: new Date(), gradedBy: req.user._id });
   attempt.markModified('responses');
   await attempt.save();
+  if (attempt.status === 'graded') notifyUsers([attempt.student], { email: true, title: `Quiz result ready: ${quiz.title}`, body: `You scored ${attempt.score} out of ${attempt.maxScore}`, tag: `result-${attempt._id}`, urls: learnUrl(attempt.course) });
   await audit(req, 'grade.quiz', { entity: 'QuizAttempt', entityId: attempt._id, summary: `Quiz "${quiz.title}" marked: ${attempt.score}/${attempt.maxScore}${before !== attempt.score ? ` (was ${before})` : ''}`, details: { student: attempt.student, quiz: quiz._id, before, after: attempt.score, status: attempt.status } });
   res.json({ attempt });
 });
@@ -760,7 +781,7 @@ export const createAnnouncement = asyncHandler(async (req, res) => {
   const a = await Announcement.create({ course: course._id, title: req.body.title, body: req.body.body, author: req.user._id });
   // Tell the enrolled students, even when the site is closed.
   Enrollment.find({ course: course._id }).distinct('student')
-    .then((ids) => sendPush(ids, { title: `${course.title}: ${a.title}`, body: (a.body || '').slice(0, 140), url: `/learn/course/${course._id}`, tag: `ann-${a._id}` }))
+    .then((ids) => notifyUsers(ids, { email: true, title: `${course.title}: ${a.title}`, body: (a.body || '').slice(0, 300), tag: `ann-${a._id}`, urls: learnUrl(course._id) }))
     .catch((e) => console.error('push failed', e.message));
   res.status(201).json({ announcement: a });
 });

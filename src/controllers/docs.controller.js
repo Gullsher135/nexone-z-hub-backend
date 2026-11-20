@@ -5,6 +5,7 @@ import { User } from '../models/User.js';
 import { nextSeq } from '../models/Counter.js';
 import { HttpError, asyncHandler } from '../utils/helpers.js';
 import { DATE_RE, dateKey } from '../utils/time.js';
+import { notifyUsers } from '../utils/push.js';
 
 const sid = (v) => String(v?._id || v);
 const isAdmin = (u) => u.role === 'admin';
@@ -90,6 +91,8 @@ export const createLetter = asyncHandler(async (req, res) => {
     type: b.type, user: u._id, person: { name: u.name, code: u.code, designation: u.designation, role: u.role },
     data, issuedBy: req.user._id,
   });
+  const label = { internship: 'internship certificate', experience: 'experience letter', warning: 'warning letter' }[b.type];
+  notifyUsers([u._id], { email: true, title: `A new ${label} was issued to you`, body: `Reference ${letter.refNo}`, tag: `letter-${letter._id}`, urls: { staff: '/letters' } });
   res.status(201).json({ letter });
 });
 

@@ -39,3 +39,11 @@ services:
         sync: false
       - key: VAPID_SUBJECT
         value: mailto:admin@nexonez.com
+      - key: CRON_KEY
+        generateValue: true
+      - key: BREVO_API_KEY
+        sync: false
+      - key: MAIL_FROM_EMAIL
+        sync: false
+      - key: APP_URL
+        sync: false

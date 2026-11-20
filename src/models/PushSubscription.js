@@ -7,6 +7,11 @@ const pushSubscriptionSchema = new mongoose.Schema(
     endpoint: { type: String, required: true, unique: true },
     keys: { p256dh: { type: String, required: true }, auth: { type: String, required: true } },
     userAgent: { type: String, maxlength: 300 },
+    label: { type: String, maxlength: 80 }, // for example "Chrome on Android"
+    lastOkAt: Date, // last time the push service accepted a message for this device
+    lastError: { type: String, maxlength: 240 },
+    lastErrorAt: Date,
+    fails: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

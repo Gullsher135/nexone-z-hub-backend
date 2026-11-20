@@ -18,6 +18,9 @@ import * as pay from '../controllers/pay.controller.js';
 import * as flow from '../controllers/flow.controller.js';
 import * as docs from '../controllers/docs.controller.js';
 import * as push from '../controllers/push.controller.js';
+import * as flowDocs from '../controllers/flowDocs.controller.js';
+import * as notif from '../controllers/notifications.controller.js';
+import * as cron from '../controllers/cron.controller.js';
 
 const router = Router();
 
@@ -43,6 +46,15 @@ router.get('/push/key', protect, push.publicKey);
 router.post('/push/subscribe', protect, push.subscribe);
 router.post('/push/unsubscribe', protect, push.unsubscribe);
 router.post('/push/test', protect, push.test);
+router.get('/push/devices', protect, notif.myDevices);
+router.delete('/push/devices/:id', protect, notif.removeDevice);
+router.get('/push/health', protect, requireRole('admin'), notif.health);
+router.patch('/auth/contact', protect, notif.setContact);
+router.get('/notifications', protect, notif.listMine);
+router.get('/notifications/unread', protect, notif.unreadCount);
+router.post('/notifications/read-all', protect, notif.markAllRead);
+router.post('/notifications/:id/read', protect, notif.markRead);
+router.delete('/notifications', protect, notif.clearAll);
 
 // ---- settings ----
 router.get('/settings', protect, settings.getSettingsHandler);
@@ -239,6 +251,20 @@ router.patch('/flow/projects/:id/milestones/:mid', protect, crewUser, flow.updat
 router.delete('/flow/projects/:id/milestones/:mid', protect, crewUser, flow.deleteMilestone);
 router.put('/flow/projects/:id/links', protect, crewUser, flow.setProjectLinks);
 router.post('/flow/projects/:id/share', protect, adminOnly, flow.setShare);
-router.get('/flow/share/:token', syncLimiter, flow.publicShare); // public: progress page for the client
+router.post('/flow/projects/:id/releases', protect, crewUser, flow.createRelease);
+router.delete('/flow/projects/:id/releases/:rid', protect, crewUser, flow.deleteRelease);
+router.get('/flow/projects/:id/export', protect, crewUser, flow.exportCards);
+router.get('/flow/projects/:id/activity', protect, crewUser, flow.activityFeed);
+router.post('/flow/projects/:id/feedback/seen', protect, crewUser, flow.feedbackSeen);
+router.get('/flow/reports/time', protect, adminOnly, flow.timeReport);
+router.get('/flow/search', protect, crewUser, flow.search);
+router.get('/flow/projects/:id/documents', protect, crewUser, flowDocs.listDocs);
+router.post('/flow/projects/:id/documents', protect, crewUser, express.raw({ type: () => true, limit: '11mb' }), flowDocs.uploadDoc);
+router.get('/flow/documents/:docId/download', protect, crewUser, flowDocs.downloadDoc);
+router.patch('/flow/documents/:docId', protect, crewUser, flowDocs.updateDoc);
+router.delete('/flow/documents/:docId', protect, crewUser, flowDocs.deleteDoc);
+router.get('/cron/reminders', syncLimiter, cron.reminders);
+router.get('/flow/share/:token', syncLimiter, flow.publicShare);
+router.post('/flow/share/:token/feedback', syncLimiter, flow.publicFeedback); // public: progress page for the client
 
 export default router;

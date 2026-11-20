@@ -6,6 +6,7 @@ import { Leave } from '../models/Leave.js';
 import { getSettings } from '../models/Setting.js';
 import { nextSeq } from '../models/Counter.js';
 import { HttpError, asyncHandler, escapeRegex } from '../utils/helpers.js';
+import { notifyUsers } from '../utils/push.js';
 import { DATE_RE, dateKey, datesBetween, monthRange, weekdayOfKey } from '../utils/time.js';
 
 const sid = (v) => String(v?._id || v);
@@ -93,6 +94,7 @@ export const setPlan = asyncHandler(async (req, res) => {
     payment = await Payment.create({ receiptNo: `RCPT-${String(n).padStart(5, '0')}`, student: student._id, amount: advance, date: advDate, method, reference: req.body.advance?.reference, note: 'Advance', receivedBy: req.user._id });
   }
   await audit(req, 'fee.plan', { entity: 'FeeAccount', entityId: acc._id, summary: `Fee plan saved for ${student.name}: total Rs ${total}${payment ? `, advance Rs ${payment.amount}` : ''}`, details: { courseFee, admissionFee, discount, total, installments: installments.length, advance: payment ? payment.amount : 0 } });
+  notifyUsers([student._id], { email: true, title: hadPlan ? 'Your fee plan was updated' : 'Your fee plan is ready', body: `Total Rs ${total}${payment ? ` · advance Rs ${payment.amount} received` : ''}`, tag: `plan-${student._id}`, urls: { student: '/learn/fees' } });
   res.json({ account: acc, payment });
 });
 
@@ -112,6 +114,7 @@ export const addPayment = asyncHandler(async (req, res) => {
   const n = await nextSeq('receipt');
   const p = await Payment.create({ receiptNo: `RCPT-${String(n).padStart(5, '0')}`, student: student._id, amount, date, method, reference: req.body.reference, note: req.body.note, receivedBy: req.user._id });
   await audit(req, 'payment.add', { entity: 'Payment', entityId: p._id, summary: `Rs ${amount} received from ${student.name} (${p.receiptNo})`, details: { student: student._id, amount, method, date, reference: req.body.reference } });
+  notifyUsers([student._id], { email: true, title: `Payment received: Rs ${amount}`, body: `Receipt ${p.receiptNo}. Thank you.`, tag: `pay-${p._id}`, urls: { student: '/learn/fees' } });
   res.status(201).json({ payment: p });
 });
 
@@ -237,6 +240,7 @@ export const payPayslip = asyncHandler(async (req, res) => {
   slip.method = METHODS.includes(req.body?.method) ? req.body.method : 'bank';
   await slip.save();
   await audit(req, 'payslip.pay', { entity: 'Payslip', entityId: slip._id, summary: `Payslip ${slip.month} marked paid: Rs ${slip.net} by ${slip.method}`, details: { user: slip.user, net: slip.net, method: slip.method } });
+  notifyUsers([slip.user], { email: true, title: `Salary paid for ${slip.month}`, body: `Rs ${slip.net} by ${slip.method}`, tag: `slip-${slip._id}`, urls: { staff: '/payslips' } });
   res.json({ payslip: slip });
 });
 

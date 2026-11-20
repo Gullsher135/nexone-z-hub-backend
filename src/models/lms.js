@@ -55,9 +55,10 @@ enrollmentSchema.index({ 'certificate.code': 1 }, { unique: true, partialFilterE
 // ---------- Files (assignment briefs and student work, stored in the database) ----------
 const storedFileSchema = new Schema(
   {
-    course: ref('Course', { required: true, index: true }),
+    course: ref('Course', { index: true, required() { return this.kind !== 'project'; } }),
+    project: ref('Project', { index: true }), // project documents (NexoneZ Flow) belong to a project instead of a course
     owner: ref('User', { required: true, index: true }),
-    kind: { type: String, enum: ['submission', 'assignment'], required: true },
+    kind: { type: String, enum: ['submission', 'assignment', 'project'], required: true },
     name: { type: String, required: true, maxlength: 160 },
     mime: { type: String, default: 'application/octet-stream', maxlength: 120 },
     size: { type: Number, required: true, min: 1 },

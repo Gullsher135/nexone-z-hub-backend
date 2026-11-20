@@ -17,6 +17,9 @@ const userSchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true },
     role: { type: String, enum: ROLES, required: true, index: true },
     email: { type: String, lowercase: true, trim: true },
+    // A real mailbox for notifications (the login email may be an ID like nz-std-0008@nexonez.com, which is not a mailbox).
+    contactEmail: { type: String, lowercase: true, trim: true, match: /^[^\s@]+@[^\s@]+\.[^\s@]+$/ },
+    emailNotifications: { type: Boolean, default: true },
     phone: { type: String, trim: true },
     cnic: { type: String, trim: true },
     password: { type: String, select: false },

@@ -14,7 +14,7 @@ import { HttpError, asyncHandler, escapeRegex, pick, randomPassword } from '../u
 import { env } from '../config/env.js';
 
 const EDITABLE = [
-  'name', 'email', 'phone', 'cnic', 'designation', 'department', 'joiningDate', 'shift',
+  'name', 'email', 'contactEmail', 'phone', 'cnic', 'designation', 'department', 'joiningDate', 'shift',
   'internship', 'batch', 'rollNo', 'admissionDate', 'guardianName', 'guardianPhone',
 ];
 

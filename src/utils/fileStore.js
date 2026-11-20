@@ -3,12 +3,13 @@ import { deleteObject, getObject, putObject, s3Enabled } from './storage.js';
 
 // One place that knows whether a file lives in the bucket or in MongoDB.
 
-export async function saveFile({ _id, course, owner, kind, name, mime, buffer }) {
-  if (!s3Enabled()) return StoredFile.create({ _id, course, owner, kind, name, mime, size: buffer.length, data: buffer, storage: 'mongo' });
-  const key = `${kind}/${course}/${_id}`;
+export async function saveFile({ _id, course, project, owner, kind, name, mime, buffer, attached }) {
+  const extra = { ...(project ? { project } : {}), ...(attached !== undefined ? { attached } : {}) };
+  if (!s3Enabled()) return StoredFile.create({ _id, course, owner, kind, name, mime, size: buffer.length, data: buffer, storage: 'mongo', ...extra });
+  const key = `${kind}/${course || project}/${_id}`;
   await putObject(key, buffer, { contentType: mime, filename: name });
   try {
-    return await StoredFile.create({ _id, course, owner, kind, name, mime, size: buffer.length, storage: 's3', key });
+    return await StoredFile.create({ _id, course, owner, kind, name, mime, size: buffer.length, storage: 's3', key, ...extra });
   } catch (err) {
     await deleteObject(key).catch(() => {}); // do not leave an orphan in the bucket
     throw err;

@@ -5,7 +5,7 @@ import { User, STAFF_ROLES } from '../models/User.js';
 import { getSettings } from '../models/Setting.js';
 import { HttpError, asyncHandler, pick } from '../utils/helpers.js';
 import { DATE_RE, dateKey, datesBetween, weekdayOfKey } from '../utils/time.js';
-import { notifyRoles } from '../utils/push.js';
+import { notifyRoles, notifyUsers } from '../utils/push.js';
 
 const isAdmin = (u) => u.role === 'admin';
 const sid = (v) => String(v?._id || v);
@@ -104,7 +104,7 @@ export const createNotice = asyncHandler(async (req, res) => {
   if (!req.body?.title?.trim()) throw new HttpError(400, 'Title is required');
   const n = await Notice.create({ ...pick(req.body, NOTICE_FIELDS), author: req.user._id, readBy: [req.user._id] });
   // Push to phones and computers even when the site is closed (fire and forget).
-  notifyRoles(NOTICE_ROLES[n.audience] || [], { title: n.title, body: (n.body || '').slice(0, 140), tag: `notice-${n._id}` }).catch((e) => console.error('push failed', e.message));
+  notifyRoles(NOTICE_ROLES[n.audience] || [], { email: true, title: n.title, body: (n.body || '').slice(0, 300), tag: `notice-${n._id}` }).catch((e) => console.error('push failed', e.message));
   res.status(201).json({ notice: n });
 });
 export const updateNotice = asyncHandler(async (req, res) => {
@@ -150,6 +150,7 @@ export const createTask = asyncHandler(async (req, res) => {
   const d = pick(req.body, TASK_FIELDS);
   checkTask(d);
   const t = await Task.create({ ...d, assignee: person._id, createdBy: req.user._id });
+  notifyUsers([person._id], { email: true, title: `New task: ${t.title}`, body: `Assigned by ${req.user.name}${t.dueDate ? ` · due ${t.dueDate}` : ''}`, tag: `task-${t._id}`, urls: { staff: '/tasks' } }, { exclude: req.user._id });
   res.status(201).json({ task: t });
 });
 
@@ -158,13 +159,18 @@ export const updateTask = asyncHandler(async (req, res) => {
   if (!t) throw new HttpError(404, 'Task not found');
   const d = pick(req.body, TASK_FIELDS);
   checkTask(d);
+  const wasDue = t.dueDate || '';
   Object.assign(t, d);
+  let reassigned = false;
   if (req.body.assignee && sid(req.body.assignee) !== sid(t.assignee)) {
     const person = await User.findOne({ _id: req.body.assignee, role: { $in: STAFF_ROLES }, isActive: true });
     if (!person) throw new HttpError(400, 'Choose an active employee or intern');
     t.assignee = person._id;
+    reassigned = true;
   }
   await t.save();
+  if (reassigned) notifyUsers([t.assignee], { email: true, title: `Task assigned to you: ${t.title}`, body: `By ${req.user.name}${t.dueDate ? ` · due ${t.dueDate}` : ''}`, tag: `task-${t._id}`, urls: { staff: '/tasks' } }, { exclude: req.user._id });
+  else if (t.dueDate && t.dueDate !== wasDue) notifyUsers([t.assignee], { title: `Due date changed: ${t.title}`, body: `Now due ${t.dueDate}`, tag: `task-${t._id}`, urls: { staff: '/tasks' } }, { exclude: req.user._id });
   res.json({ task: t });
 });
 
@@ -190,6 +196,7 @@ export const setTaskStatus = asyncHandler(async (req, res) => {
   t.status = status;
   t.completedAt = status === 'done' ? t.completedAt || new Date() : undefined;
   await t.save();
+  if (status === 'done') notifyUsers([t.createdBy], { title: `Task done: ${t.title}`, body: `Completed by ${req.user.name}`, tag: `task-${t._id}`, urls: { admin: '/admin/crew/tasks' } }, { exclude: req.user._id });
   res.json({ task: t });
 });
 
@@ -199,6 +206,7 @@ export const commentTask = asyncHandler(async (req, res) => {
   if (!text) throw new HttpError(400, 'Write a comment');
   t.comments.push({ author: req.user._id, text: text.slice(0, 1000) });
   await t.save();
+  notifyUsers([t.assignee, t.createdBy], { title: `${req.user.name} commented on ${t.title}`, body: text.slice(0, 120), tag: `taskcmt-${t._id}`, urls: { admin: '/admin/crew/tasks', staff: '/tasks' } }, { exclude: req.user._id });
   res.status(201).json({ task: t });
 });
 

@@ -18,6 +18,15 @@ export const env = {
   // Auto-created logins: <ID>@<loginDomain>, e.g. nz-std-0008@nexonez.com, with this starting password.
   loginDomain: (process.env.LOGIN_DOMAIN || 'nexonez.com').toLowerCase().replace(/^@/, ''),
   defaultPassword: process.env.DEFAULT_PASSWORD || 'nz123',
+  // The address people open (used for links inside emails).
+  appUrl: (process.env.APP_URL || list(process.env.CLIENT_URL, 'http://localhost:5173')[0]).replace(/\/$/, ''),
+  // Email for people whose phone is off: free Brevo account (300 emails a day). Leave empty to switch email off.
+  mail: {
+    apiKey: process.env.BREVO_API_KEY,
+    fromEmail: process.env.MAIL_FROM_EMAIL,
+    fromName: process.env.MAIL_FROM_NAME || 'NexoneZ Hub',
+    dailyLimit: Number(process.env.MAIL_DAILY_LIMIT) || 250,
+  },
   // Free browser push notifications (Web Push / VAPID). Generate keys once with: npm run vapid
   vapid: {
     publicKey: process.env.VAPID_PUBLIC_KEY,

@@ -141,12 +141,18 @@ const round1 = (n) => Math.round(n * 10) / 10;
 // What a client may see on the shared page: progress only. No budget, people, comments, hours or internal links.
 export function publicShareView({ project, items, today, client }) {
   const h = projectHealth({ project, items, today });
+  // the client's own approvals, shown as "Approved by ..."
+  const approvals = new Map((project.clientFeedback || []).filter((f) => f.kind === 'approval' && f.milestone).map((f) => [sid(f.milestone), f]));
   const out = {
-    project: { name: project.name, client: client?.name || null, status: project.status, startDate: project.startDate || null, dueDate: project.dueDate || null },
+    project: { name: project.name, kind: project.kind || 'project', stage: project.stage || null, version: project.version || null, client: client?.name || null, status: project.status, startDate: project.startDate || null, dueDate: project.dueDate || null },
+    allowFeedback: project.share?.allowFeedback !== false,
     progress: { percent: h.percent, total: h.total, done: h.done, byStatus: h.byStatus },
-    milestones: h.milestones.map((m) => ({ name: m.name, dueDate: m.dueDate, percent: m.percent, total: m.total, done: m.done, complete: m.complete, overdue: m.overdue })),
+    milestones: h.milestones.map((m) => { const a = approvals.get(sid(m._id)); return { id: sid(m._id), name: m.name, dueDate: m.dueDate, percent: m.percent, total: m.total, done: m.done, complete: m.complete, overdue: m.overdue, approvedBy: a?.name || null, approvedAt: a?.at || null }; }),
     updatedAt: items.reduce((latest, i) => (i.updatedAt && (!latest || new Date(i.updatedAt) > new Date(latest)) ? i.updatedAt : latest), project.updatedAt || null),
   };
+  if ((project.kind || 'project') !== 'project') {
+    out.releases = [...(project.releases || [])].reverse().slice(0, 10).map((r) => ({ version: r.version, title: r.title || '', type: r.type, date: r.date || null, notes: r.notes || '' }));
+  }
   if (project.share?.showTasks) {
     out.tasks = items.map((i) => ({ title: i.title, status: i.status, type: i.type || 'task', dueDate: i.dueDate || null, milestone: i.milestone ? (project.milestones || []).find((m) => sid(m._id) === sid(i.milestone))?.name || null : null }));
   }
