@@ -186,6 +186,7 @@ router.post('/lms/quizzes/:id/start', protect, requireRole('student'), lms.start
 router.post('/lms/quizzes/:id/attempt', protect, requireRole('student'), lms.attemptQuiz);
 router.get('/lms/attempts/:id', protect, lms.getAttempt);
 router.patch('/lms/attempts/:id/grade', protect, teachRoles, lms.gradeAttempt);
+router.delete('/lms/attempts/:id', protect, teachRoles, lms.resetAttempt);
 router.get('/lms/quizzes/:id/attempts', protect, teachRoles, lms.listAttempts);
 router.get('/lms/courses/:id/announcements', protect, lms.listAnnouncements);
 router.post('/lms/courses/:id/announcements', protect, teachRoles, lms.createAnnouncement);

@@ -754,6 +754,22 @@ export const getAttempt = asyncHandler(async (req, res) => {
 });
 
 // Teacher marks the written answers: body { marks: [{ question, marks, feedback }], comment }.
+// Teacher or admin: delete one result (for example the student pressed Submit by mistake) so it does not count
+// and the student gets that attempt back. The student is told they can take the quiz again.
+export const resetAttempt = asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) throw new HttpError(404, 'Result not found');
+  const attempt = await QuizAttempt.findById(req.params.id);
+  if (!attempt) throw new HttpError(404, 'Result not found');
+  const { manage } = await access(req, attempt.course);
+  if (!manage) throw new HttpError(403, 'Not allowed');
+  const quiz = await Quiz.findById(attempt.quiz).select('title');
+  const who = await User.findById(attempt.student).select('name code');
+  await attempt.deleteOne();
+  notifyUsers([attempt.student], { email: true, title: `You can take the quiz again: ${quiz?.title || 'Quiz'}`, body: 'Your teacher reset your last attempt. Open the course and start the quiz again.', tag: `reset-${attempt._id}`, urls: learnUrl(attempt.course) });
+  audit(req, 'quiz.attempt.reset', { entity: 'QuizAttempt', entityId: attempt._id, summary: `Reset ${who?.name || 'student'} ${who?.code || ''} on "${quiz?.title}" (had ${attempt.score}/${attempt.maxScore})` });
+  res.json({ message: 'Attempt reset. The student can take the quiz again.' });
+});
+
 export const gradeAttempt = asyncHandler(async (req, res) => {
   const attempt = await QuizAttempt.findById(req.params.id);
   if (!attempt) throw new HttpError(404, 'Result not found');
