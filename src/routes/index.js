@@ -20,6 +20,7 @@ import * as docs from '../controllers/docs.controller.js';
 import * as push from '../controllers/push.controller.js';
 import * as flowDocs from '../controllers/flowDocs.controller.js';
 import * as notif from '../controllers/notifications.controller.js';
+import * as comp from '../controllers/competitions.controller.js';
 import * as cron from '../controllers/cron.controller.js';
 
 const router = Router();
@@ -114,6 +115,21 @@ router.get('/reports/export', protect, adminOnly, reports.exportCsv);
 
 // ---- NexoneZ Learn (LMS) ----
 router.get('/lms/verify/:code', syncLimiter, lms.verifyCertificate);
+router.get('/lms/competition-verify/:code', syncLimiter, comp.verify);
+router.get('/lms/my/competitions', protect, requireRole('student'), comp.mine);
+router.get('/lms/my/competitions/:id', protect, requireRole('student'), comp.mineOne);
+router.get('/lms/competitions', protect, teachRoles, comp.list);
+router.post('/lms/competitions', protect, teachRoles, comp.create);
+router.get('/lms/competitions/:id', protect, teachRoles, comp.get);
+router.patch('/lms/competitions/:id', protect, teachRoles, comp.update);
+router.delete('/lms/competitions/:id', protect, teachRoles, comp.remove);
+router.put('/lms/competitions/:id/participants', protect, teachRoles, comp.setParticipants);
+router.put('/lms/competitions/:id/results', protect, teachRoles, comp.saveResults);
+router.post('/lms/competitions/:id/import-quiz', protect, teachRoles, comp.importQuiz);
+router.post('/lms/competitions/:id/rank', protect, teachRoles, comp.rank);
+router.post('/lms/competitions/:id/publish', protect, teachRoles, comp.publish);
+router.post('/lms/competitions/:id/certificates', protect, teachRoles, comp.issueCertificates);
+router.delete('/lms/competitions/:id/certificates/:studentId', protect, teachRoles, comp.revokeCertificate);
 router.get('/lms/overview', protect, teachRoles, lms.adminOverview);
 router.get('/lms/my/overview', protect, requireRole('student'), lms.myOverview);
 router.get('/lms/pool', protect, teachRoles, lms.studentPool);

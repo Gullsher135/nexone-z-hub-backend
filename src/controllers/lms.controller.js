@@ -7,7 +7,7 @@ import { User, STAFF_ROLES } from '../models/User.js';
 import { Batch } from '../models/Batch.js';
 import { StudentAttendance } from '../models/StudentAttendance.js';
 import { deleteStoredFiles } from '../utils/fileStore.js';
-import { computeProgress, progressKey, visibleForBatch } from '../utils/progress.js';
+import { computeProgress, progressKey, visibleFor } from '../utils/progress.js';
 import { nextSeq } from '../models/Counter.js';
 import { HttpError, asyncHandler, pick, randomPassword } from '../utils/helpers.js';
 import { dateKey, DATE_RE } from '../utils/time.js';
@@ -53,14 +53,14 @@ export { access as courseAccess };
 async function courseStudents(courseId, item) {
   try {
     const ens = await Enrollment.find({ course: courseId }).select('student batch').lean();
-    return ens.filter((e) => visibleForBatch(item || {}, e.batch)).map((e) => e.student);
+    return ens.filter((e) => visibleFor(item || {}, { batch: e.batch, student: e.student })).map((e) => e.student);
   } catch (e) {
     console.error('could not list students', e.message);
     return [];
   }
 }
 const learnUrl = (courseId) => ({ student: `/learn/course/${courseId}` });
-export { batchFor, cleanBatches, withBatchNames, planFiles, applyPlan, cleanLinks }; // shared with the presentation module
+export { batchFor, cleanBatches, cleanStudents, withBatchNames, planFiles, applyPlan, cleanLinks }; // shared with the presentation module
 
 // The batch a student sits in for this course: their own enrolment first, then their general batch.
 // A batch that belongs to another course is ignored.
@@ -82,11 +82,34 @@ async function cleanBatches(course, raw) {
   return ids;
 }
 
-// Adds batchNames (for the teacher screens) to a list of assignments or quizzes.
+// Which students an assignment or quiz is limited to. They must be enrolled in this course.
+async function cleanStudents(course, raw) {
+  const ids = [...new Set((Array.isArray(raw) ? raw : []).map(String))];
+  if (!ids.length) return [];
+  if (ids.some((i) => !mongoose.isValidObjectId(i))) throw new HttpError(400, 'Invalid student');
+  if (ids.length > 500) throw new HttpError(400, 'Choose at most 500 students');
+  const found = await Enrollment.countDocuments({ course: course._id, student: { $in: ids } });
+  if (found !== ids.length) throw new HttpError(400, 'Choose students who are enrolled in this course');
+  return ids;
+}
+
+// Audience of an assignment or quiz: everyone, some batches, or chosen students (students win). Returns the fields to save.
+async function audienceFields(course, body, current) {
+  const hasB = body.batches !== undefined;
+  const hasS = body.students !== undefined;
+  if (!hasB && !hasS) return {};
+  const students = hasS ? await cleanStudents(course, body.students) : (current?.students || []).map(sid);
+  const batches = hasB ? await cleanBatches(course, body.batches) : (current?.batches || []).map(sid);
+  return students.length ? { students, batches: [] } : { students: [], batches };
+}
+
+// Adds batchNames and studentNames (for the teacher screens) to a list of assignments or quizzes.
 async function withBatchNames(items) {
   const ids = [...new Set(items.flatMap((i) => (i.batches || []).map(sid)))];
   const names = new Map((ids.length ? await Batch.find({ _id: { $in: ids } }).select('name').lean() : []).map((b) => [sid(b._id), b.name]));
-  return items.map((i) => ({ ...i, batchNames: (i.batches || []).map((b) => names.get(sid(b))).filter(Boolean) }));
+  const sids = [...new Set(items.flatMap((i) => (i.students || []).map(sid)))];
+  const people = new Map((sids.length ? await User.find({ _id: { $in: sids } }).select('name').lean() : []).map((u) => [sid(u._id), u.name]));
+  return items.map((i) => ({ ...i, batchNames: (i.batches || []).map((b) => names.get(sid(b))).filter(Boolean), studentNames: (i.students || []).map((s) => people.get(sid(s))).filter(Boolean) }));
 }
 
 // ----- courses -----
@@ -306,7 +329,7 @@ export const listAssignments = asyncHandler(async (req, res) => {
   let items = await Assignment.find({ course: course._id }).sort({ dueDate: 1, createdAt: -1 }).lean();
   if (!manage) {
     const eb = await batchFor(course, enrollment, req.user);
-    items = items.filter((a) => visibleForBatch(a, eb));
+    items = items.filter((a) => visibleFor(a, { batch: eb, student: req.user._id }));
   }
   if (manage) {
     items = await withBatchNames(items);
@@ -364,9 +387,9 @@ export const createAssignment = asyncHandler(async (req, res) => {
   if (!req.body?.title) throw new HttpError(400, 'Title is required');
   const data = pick(req.body, ASSIGN_FIELDS);
   checkAssign(data);
-  const batches = await cleanBatches(course, req.body.batches);
+  const audience = await audienceFields(course, req.body);
   const plan = await planFiles(req.body.attachmentIds, { course: course._id, owner: req.user._id, kind: 'assignment' });
-  const a = await Assignment.create({ ...data, batches, attachments: plan.refs, course: course._id, createdBy: req.user._id });
+  const a = await Assignment.create({ ...data, ...audience, attachments: plan.refs, course: course._id, createdBy: req.user._id });
   await applyPlan(plan);
   courseStudents(course._id, a).then((ids) => notifyUsers(ids, { email: true, title: `New assignment: ${a.title}`, body: `${course.title}${a.dueDate ? ` · due ${a.dueDate}` : ''}`, tag: `asg-${a._id}`, urls: learnUrl(course._id) }));
   res.status(201).json({ assignment: a });
@@ -384,7 +407,7 @@ export const updateAssignment = asyncHandler(async (req, res) => {
   if (!manage) throw new HttpError(403, 'Not allowed');
   const data = pick(req.body, ASSIGN_FIELDS);
   checkAssign(data);
-  if (req.body.batches !== undefined) a.batches = await cleanBatches(course, req.body.batches);
+  Object.assign(a, await audienceFields(course, req.body, a));
   let plan = null;
   if (req.body.attachmentIds !== undefined) {
     plan = await planFiles(req.body.attachmentIds, { course: a.course, owner: req.user._id, kind: 'assignment', existing: a.attachments });
@@ -410,7 +433,7 @@ export const deleteAssignment = asyncHandler(async (req, res) => {
 export const submitAssignment = asyncHandler(async (req, res) => {
   if (!isStudent(req.user)) throw new HttpError(403, 'Only students submit work');
   const { a, course, enrollment } = await ownAssignment(req);
-  if (!visibleForBatch(a, await batchFor(course, enrollment, req.user))) throw new HttpError(403, 'This assignment is not for your batch');
+  if (!visibleFor(a, { batch: await batchFor(course, enrollment, req.user), student: req.user._id })) throw new HttpError(403, 'This assignment is not for you');
   const text = String(req.body?.text || '').trim().slice(0, 10000);
   const links = cleanLinks(req.body?.links ?? (req.body?.link ? [req.body.link] : []));
   const late = !!a.dueDate && dateKey() > a.dueDate;
@@ -525,7 +548,7 @@ export const listQuizzes = asyncHandler(async (req, res) => {
   let quizzes = await Quiz.find(manage ? { course: course._id } : { course: course._id, published: true }).sort({ createdAt: -1 }).lean();
   if (!manage) {
     const eb = await batchFor(course, enrollment, req.user);
-    quizzes = quizzes.filter((q) => visibleForBatch(q, eb));
+    quizzes = quizzes.filter((q) => visibleFor(q, { batch: eb, student: req.user._id }));
   } else {
     quizzes = await withBatchNames(quizzes);
   }
@@ -538,7 +561,7 @@ export const listQuizzes = asyncHandler(async (req, res) => {
       const done = at.filter((a) => a.status !== 'in_progress');
       const base = {
         _id: q._id, title: q.title, description: q.description, kind: q.kind || 'daily', timeLimit: q.timeLimit || 0,
-        maxAttempts: q.maxAttempts, published: q.published, batches: q.batches, batchNames: q.batchNames,
+        maxAttempts: q.maxAttempts, published: q.published, batches: q.batches, batchNames: q.batchNames, students: q.students, studentNames: q.studentNames,
         questionCount: q.questions.length, totalPoints: totalOf(q),
       };
       if (manage) return { ...base, attempts: done.length, toMark: done.filter((a) => a.status === 'pending').length };
@@ -560,10 +583,10 @@ export const listQuizzes = asyncHandler(async (req, res) => {
 export const createQuiz = asyncHandler(async (req, res) => {
   const { course } = await access(req);
   if (!req.body?.title) throw new HttpError(400, 'Title is required');
-  const batches = await cleanBatches(course, req.body.batches);
+  const audience = await audienceFields(course, req.body);
   const settings = quizSettings(req.body);
   const quiz = await Quiz.create({
-    batches, ...settings, course: course._id, title: req.body.title, description: req.body.description,
+    ...audience, ...settings, course: course._id, title: req.body.title, description: req.body.description,
     maxAttempts: req.body.maxAttempts ?? 1, published: req.body.published !== false,
     questions: cleanQuestions(req.body.questions, settings.kind), createdBy: req.user._id,
   });
@@ -588,7 +611,7 @@ const studentQuizView = (quiz, withQuestions) => {
 export const getQuiz = asyncHandler(async (req, res) => {
   const { quiz, manage, course, enrollment } = await ownQuiz(req);
   if (manage) return res.json({ quiz });
-  if (!quiz.published || !visibleForBatch(quiz, await batchFor(course, enrollment, req.user))) throw new HttpError(404, 'Quiz not found');
+  if (!quiz.published || !visibleFor(quiz, { batch: await batchFor(course, enrollment, req.user), student: req.user._id })) throw new HttpError(404, 'Quiz not found');
   await settleExpired({ quiz: quiz._id, student: req.user._id });
   const mine = await QuizAttempt.find({ quiz: quiz._id, student: req.user._id }).select('-responses -answers').sort({ submittedAt: -1 }).lean();
   const active = mine.find((a) => a.status === 'in_progress');
@@ -604,7 +627,7 @@ export const updateQuiz = asyncHandler(async (req, res) => {
   if (!manage) throw new HttpError(403, 'Not allowed');
   const wasPublished = quiz.published;
   Object.assign(quiz, pick(req.body, ['title', 'description', 'maxAttempts', 'published']), quizSettings(req.body));
-  if (req.body.batches !== undefined) quiz.batches = await cleanBatches(course, req.body.batches);
+  Object.assign(quiz, await audienceFields(course, req.body, quiz));
   if (req.body.questions) {
     const next = cleanQuestions(req.body.questions, quiz.kind);
     if (await QuizAttempt.exists({ quiz: quiz._id })) {
@@ -635,7 +658,7 @@ export const deleteQuiz = asyncHandler(async (req, res) => {
 export const startQuiz = asyncHandler(async (req, res) => {
   if (!isStudent(req.user)) throw new HttpError(403, 'Only students take quizzes');
   const { quiz, course, enrollment } = await ownQuiz(req);
-  if (!quiz.published || !visibleForBatch(quiz, await batchFor(course, enrollment, req.user))) throw new HttpError(404, 'Quiz not found');
+  if (!quiz.published || !visibleFor(quiz, { batch: await batchFor(course, enrollment, req.user), student: req.user._id })) throw new HttpError(404, 'Quiz not found');
   if (!quiz.timeLimit) throw new HttpError(400, 'This quiz has no timer. Just answer and submit.');
   await settleExpired({ quiz: quiz._id, student: req.user._id });
   let open = await QuizAttempt.findOne({ quiz: quiz._id, student: req.user._id, status: 'in_progress' });
@@ -662,7 +685,7 @@ const cleanChoice = (c, q) => {
 export const attemptQuiz = asyncHandler(async (req, res) => {
   if (!isStudent(req.user)) throw new HttpError(403, 'Only students take quizzes');
   const { quiz, course, enrollment } = await ownQuiz(req);
-  if (!quiz.published || !visibleForBatch(quiz, await batchFor(course, enrollment, req.user))) throw new HttpError(404, 'Quiz not found');
+  if (!quiz.published || !visibleFor(quiz, { batch: await batchFor(course, enrollment, req.user), student: req.user._id })) throw new HttpError(404, 'Quiz not found');
   await settleExpired({ quiz: quiz._id, student: req.user._id });
   const open = await QuizAttempt.findOne({ quiz: quiz._id, student: req.user._id, status: 'in_progress' });
   if (quiz.timeLimit > 0 && !open) throw new HttpError(409, 'Your time is over, or the quiz was not started. Open the quiz again.');
@@ -810,7 +833,7 @@ export const myOverview = asyncHandler(async (req, res) => {
   const today = dateKey();
   const myBatch = new Map(await Promise.all(live.map(async (e) => [sid(e.course._id), await batchFor(e.course, e, req.user)])));
   const pending = assignments
-    .filter((a) => !done.has(sid(a._id)) && visibleForBatch(a, myBatch.get(sid(a.course))))
+    .filter((a) => !done.has(sid(a._id)) && visibleFor(a, { batch: myBatch.get(sid(a.course)), student: req.user._id }))
     .map((a) => ({ _id: a._id, course: a.course, title: a.title, dueDate: a.dueDate, overdue: !!a.dueDate && a.dueDate < today, courseTitle: live.find((e) => sid(e.course._id) === sid(a.course))?.course.title }))
     .sort((x, y) => (x.dueDate || '9999').localeCompare(y.dueDate || '9999'));
   const prog = await computeProgress(live.map((e) => ({ course: e.course, enrollment: e, student: req.user })));

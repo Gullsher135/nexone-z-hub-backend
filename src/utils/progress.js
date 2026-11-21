@@ -1,3 +1,4 @@
+import { visibleForBatch, visibleFor } from './visibility.js';
 import { Assignment, Submission, Quiz, QuizAttempt } from '../models/lms.js';
 import { StudentAttendance } from '../models/StudentAttendance.js';
 import { Batch } from '../models/Batch.js';
@@ -15,9 +16,7 @@ export const WEIGHTS = { attendance: 1, assignments: 1, quizzes: 1 };
 export const WEAK_BELOW = 60; // a part under this percentage is flagged as a weak area
 
 const sid = (v) => String(v?._id || v);
-// An assignment or quiz with no batches is for the whole course; otherwise only for the listed batches.
-export const visibleForBatch = (item, batchId) =>
-  !item.batches?.length || (!!batchId && item.batches.some((b) => sid(b) === sid(batchId)));
+export { visibleForBatch, visibleFor };
 
 const pct = (num, den) => (den > 0 ? Math.min(100, Math.round((num / den) * 100)) : null);
 
@@ -132,9 +131,9 @@ export async function computeProgress(items) {
 
   const batchIds = [...new Set(items.map((i) => batchOf(i.enrollment, i.student)).filter(Boolean).map(sid))];
   const [assignments, submissions, quizzes, attempts, batches] = await Promise.all([
-    Assignment.find({ course: { $in: courseIds } }).select('course title dueDate maxPoints batches').lean(),
+    Assignment.find({ course: { $in: courseIds } }).select('course title dueDate maxPoints batches students').lean(),
     Submission.find({ course: { $in: courseIds }, student: { $in: studentIds } }).select('assignment course student grade gradedAt late').lean(),
-    Quiz.find({ course: { $in: courseIds }, published: true }).select('course title questions.points batches').lean(),
+    Quiz.find({ course: { $in: courseIds }, published: true }).select('course title questions.points batches students').lean(),
     QuizAttempt.find({ course: { $in: courseIds }, student: { $in: studentIds } }).select('quiz course student score status').lean(),
     batchIds.length ? Batch.find({ _id: { $in: batchIds } }).select('courseId').lean() : [],
   ]);
@@ -153,9 +152,9 @@ export async function computeProgress(items) {
     out.set(`${cid}:${stid}`, buildProgress({
       today,
       attendance: bOk ? marks.filter((m) => sid(m.student) === stid && sid(m.batch) === sid(b)) : [],
-      assignments: assignments.filter((a) => sid(a.course) === cid && visibleForBatch(a, eb)),
+      assignments: assignments.filter((a) => sid(a.course) === cid && visibleFor(a, { batch: eb, student: stid })),
       submissions: submissions.filter((s) => sid(s.course) === cid && sid(s.student) === stid),
-      quizzes: quizzes.filter((q) => sid(q.course) === cid && visibleForBatch(q, eb)),
+      quizzes: quizzes.filter((q) => sid(q.course) === cid && visibleFor(q, { batch: eb, student: stid })),
       attempts: attempts.filter((a) => sid(a.course) === cid && sid(a.student) === stid),
     }));
   }

@@ -86,6 +86,7 @@ const assignmentSchema = new Schema(
     requireAttachment: { type: Boolean, default: false }, // students must hand in a file or a link
     attachments: [fileRefSchema], // brief or starter files from the teacher
     batches: [ref('Batch')], // empty = every batch of the course; otherwise only these batches
+    students: [ref('User')], // when filled, only these students see it (this wins over batches)
     createdBy: ref('User'),
   },
   { timestamps: true }
@@ -141,6 +142,7 @@ const quizSchema = new Schema(
     revealAnswers: { type: Boolean, default: true }, // show the correct answers after the student finishes
     published: { type: Boolean, default: true },
     batches: [ref('Batch')], // empty = every batch of the course; otherwise only these batches
+    students: [ref('User')], // when filled, only these students see it (this wins over batches)
     questions: [questionSchema],
     createdBy: ref('User'),
   },

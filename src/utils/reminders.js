@@ -9,7 +9,7 @@ import { dateKey } from './time.js';
 import { addDays, daysBetween } from './flowCalc.js';
 import { bucketByPerson, describeCounts, feeReminder } from './reminderCalc.js';
 import { summarize } from '../controllers/pay.controller.js';
-import { visibleForBatch } from './progress.js';
+import { visibleFor } from './progress.js';
 
 const sid = (v) => String(v?._id || v);
 
@@ -52,14 +52,14 @@ async function projectDeadlines(today, stats) {
 
 async function assignmentReminders(today, stats) {
   const tomorrow = addDays(today, 1);
-  const list = await Assignment.find({ dueDate: { $in: [today, tomorrow] } }).select('title course dueDate batches').lean();
+  const list = await Assignment.find({ dueDate: { $in: [today, tomorrow] } }).select('title course dueDate batches students').lean();
   for (const a of list) {
     const when = a.dueDate === today ? 'today' : 'tomorrow';
     const [ens, subs] = await Promise.all([Enrollment.find({ course: a.course }).select('student batch').lean(), Submission.find({ assignment: a._id }).select('student').lean()]);
     const done = new Set(subs.map((s) => sid(s.student)));
     const todo = [];
     for (const e of ens) {
-      if (!visibleForBatch(a, e.batch) || done.has(sid(e.student))) continue;
+      if (!visibleFor(a, { batch: e.batch, student: e.student }) || done.has(sid(e.student))) continue;
       if (await claim(`asg:${a._id}:${e.student}:${when}`)) todo.push(e.student);
     }
     if (todo.length) {
