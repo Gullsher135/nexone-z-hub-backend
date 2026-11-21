@@ -1,4 +1,5 @@
 import express from 'express';
+import compression from 'compression';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -11,6 +12,7 @@ export function createApp() {
   app.set('trust proxy', env.trustProxy); // Render sits behind a proxy
 
   app.use(helmet());
+  app.use(compression()); // smaller answers, faster on slow connections
   app.use(
     cors({
       origin(origin, cb) {

@@ -64,8 +64,16 @@ export const setContact = asyncHandler(async (req, res) => {
   res.json({ contactEmail: user.contactEmail || '', emailNotifications: user.emailNotifications !== false });
 });
 
+// How fast the database answers from this server. A high number means the two are far apart (different regions).
+async function dbPingMs() {
+  const t = [];
+  for (let i = 0; i < 3; i++) { const s = Date.now(); await mongoose.connection.db.admin().ping(); t.push(Date.now() - s); }
+  return Math.round(t.reduce((a, b) => a + b, 0) / t.length);
+}
+
 // ---- admin: who will actually receive notifications? ----
 export const health = asyncHandler(async (_req, res) => {
+  const perf = { uptimeMinutes: Math.round(process.uptime() / 60), dbPingMs: await dbPingMs().catch(() => null) };
   const [users, devices] = await Promise.all([
     User.find({ isActive: true }).select('name code role contactEmail emailNotifications').lean(),
     PushSubscription.aggregate([{ $group: { _id: '$user', devices: { $sum: 1 }, lastOkAt: { $max: '$lastOkAt' }, lastErrorAt: { $max: '$lastErrorAt' }, failing: { $sum: { $cond: [{ $gt: ['$fails', 2] }, 1, 0] } } } }]),
@@ -84,6 +92,7 @@ export const health = asyncHandler(async (_req, res) => {
     else if (d.failing) failing.push({ _id: u._id, name: u.name, code: u.code, role: u.role, devices: d.devices });
   }
   res.json({
+    perf,
     config: { push: pushEnabled(), email: mailEnabled(), emailFrom: mailEnabled() ? env.mail.fromEmail : null, cron: !!process.env.CRON_KEY, fileStorage: s3Enabled() ? 'bucket' : 'database', appUrl: env.appUrl },
     roles,
     missing: missing.slice(0, 400),

@@ -35,7 +35,7 @@ const loginLimiter = rateLimit({
 
 const syncLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 40, standardHeaders: true, legacyHeaders: false, message: { message: 'Too many requests.' } });
 
-router.get('/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+router.get('/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()) }));
 
 // ---- auth ----
 router.post('/auth/login', loginLimiter, auth.login);
