@@ -1,4 +1,5 @@
 import { PushSubscription } from '../models/PushSubscription.js';
+import { DeviceToken } from '../models/DeviceToken.js';
 import { env } from '../config/env.js';
 import { HttpError, asyncHandler } from '../utils/helpers.js';
 import { deviceLabel } from '../utils/device.js';
@@ -34,4 +35,18 @@ export const test = asyncHandler(async (req, res) => {
   if (!pushEnabled()) throw new HttpError(400, 'Notifications are not set up on the server yet (VAPID keys are missing)');
   const devices = await testDevices(req.user._id);
   res.json({ sent: devices.filter((d) => d.ok).length, devices });
+});
+
+// The phone app registers its Firebase token after login, and removes it on logout.
+export const registerDevice = asyncHandler(async (req, res) => {
+  const token = String(req.body?.token || '').trim();
+  if (token.length < 20 || token.length > 4096) throw new HttpError(400, 'Invalid device token');
+  await DeviceToken.findOneAndUpdate({ token }, { user: req.user._id, platform: String(req.body?.platform || '').slice(0, 20) }, { upsert: true, new: true, setDefaultsOnInsert: true });
+  res.json({ ok: true });
+});
+
+export const unregisterDevice = asyncHandler(async (req, res) => {
+  const token = String(req.body?.token || '').trim();
+  if (token) await DeviceToken.deleteOne({ token, user: req.user._id });
+  res.json({ ok: true });
 });

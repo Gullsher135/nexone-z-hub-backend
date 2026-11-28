@@ -47,6 +47,8 @@ router.get('/push/key', protect, push.publicKey);
 router.post('/push/subscribe', protect, push.subscribe);
 router.post('/push/unsubscribe', protect, push.unsubscribe);
 router.post('/push/test', protect, push.test);
+router.post('/push/device', protect, push.registerDevice);
+router.post('/push/device/remove', protect, push.unregisterDevice);
 router.get('/push/devices', protect, notif.myDevices);
 router.delete('/push/devices/:id', protect, notif.removeDevice);
 router.get('/push/health', protect, requireRole('admin'), notif.health);

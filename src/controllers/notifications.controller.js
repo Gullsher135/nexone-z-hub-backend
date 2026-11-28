@@ -1,6 +1,8 @@
 import mongoose from 'mongoose';
 import { Notification } from '../models/Notification.js';
 import { PushSubscription } from '../models/PushSubscription.js';
+import { DeviceToken } from '../models/DeviceToken.js';
+import { fcmEnabled } from '../utils/fcm.js';
 import { User } from '../models/User.js';
 import { env } from '../config/env.js';
 import { HttpError, asyncHandler } from '../utils/helpers.js';
@@ -41,12 +43,14 @@ export const clearAll = asyncHandler(async (req, res) => {
 // ---- my devices ----
 export const myDevices = asyncHandler(async (req, res) => {
   const items = await PushSubscription.find({ user: req.user._id }).select('label createdAt lastOkAt lastError lastErrorAt fails endpoint').sort({ createdAt: -1 }).lean();
-  res.json({ items: items.map(({ endpoint, ...d }) => ({ ...d, endpointTail: endpoint.slice(-24) })) });
+  const phones = await DeviceToken.find({ user: req.user._id }).select('platform createdAt lastOkAt lastError').lean();
+  res.json({ items: [...items.map(({ endpoint, ...d }) => ({ ...d, endpointTail: endpoint.slice(-24) })), ...phones.map((p) => ({ _id: p._id, label: `NexoneZ app on ${p.platform || 'phone'}`, createdAt: p.createdAt, lastOkAt: p.lastOkAt, lastError: p.lastError, fails: p.lastError ? 3 : 0, app: true }))] });
 });
 
 export const removeDevice = asyncHandler(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) throw new HttpError(404, 'Not found');
   await PushSubscription.deleteOne({ _id: req.params.id, user: req.user._id });
+  await DeviceToken.deleteOne({ _id: req.params.id, user: req.user._id });
   res.json({ message: 'Removed' });
 });
 
@@ -79,6 +83,7 @@ export const health = asyncHandler(async (_req, res) => {
     PushSubscription.aggregate([{ $group: { _id: '$user', devices: { $sum: 1 }, lastOkAt: { $max: '$lastOkAt' }, lastErrorAt: { $max: '$lastErrorAt' }, failing: { $sum: { $cond: [{ $gt: ['$fails', 2] }, 1, 0] } } } }]),
   ]);
   const by = new Map(devices.map((d) => [String(d._id), d]));
+  for (const t of await DeviceToken.aggregate([{ $group: { _id: '$user', n: { $sum: 1 } } }])) { const cur = by.get(String(t._id)); by.set(String(t._id), cur ? { ...cur, devices: cur.devices + t.n } : { _id: t._id, devices: t.n, failing: 0 }); }
   const roles = {};
   const missing = [];
   const failing = [];
@@ -93,7 +98,7 @@ export const health = asyncHandler(async (_req, res) => {
   }
   res.json({
     perf,
-    config: { push: pushEnabled(), email: mailEnabled(), emailFrom: mailEnabled() ? env.mail.fromEmail : null, cron: !!process.env.CRON_KEY, fileStorage: s3Enabled() ? 'bucket' : 'database', appUrl: env.appUrl },
+    config: { push: pushEnabled(), appPush: fcmEnabled(), email: mailEnabled(), emailFrom: mailEnabled() ? env.mail.fromEmail : null, cron: !!process.env.CRON_KEY, fileStorage: s3Enabled() ? 'bucket' : 'database', appUrl: env.appUrl },
     roles,
     missing: missing.slice(0, 400),
     missingTotal: missing.length,

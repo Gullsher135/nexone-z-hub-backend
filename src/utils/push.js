@@ -6,6 +6,8 @@ import { User } from '../models/User.js';
 import { clip, emailAllowed, urlFor } from './notifyCalc.js';
 import { mailEnabled, sendMail } from './mailer.js';
 import { renderEmail } from './mailTemplate.js';
+import { DeviceToken } from '../models/DeviceToken.js';
+import { fcmEnabled, sendFcm } from './fcm.js';
 
 export const pushEnabled = () => Boolean(env.vapid.publicKey && env.vapid.privateKey);
 
@@ -77,6 +79,13 @@ async function deliver(users, payload) {
     const subs = await PushSubscription.find({ user: { $in: users.map((u) => u._id) } }).lean();
     const results = await sendWeb(subs, (s) => ({ title: clip(payload.title, 120), body: clip(payload.body, 200), tag: payload.tag, url: urlFor(role.get(String(s.user)), payload) }));
     sent = results.filter((r) => r.ok).length;
+  }
+  if (fcmEnabled()) {
+    try {
+      const role = new Map(users.map((u) => [String(u._id), u.role]));
+      const tokens = await DeviceToken.find({ user: { $in: users.map((u) => u._id) } }).lean();
+      sent += await sendFcm(tokens.map((t) => ({ token: t.token, title: clip(payload.title, 120), body: clip(payload.body, 200), tag: payload.tag, url: urlFor(role.get(String(t.user)), payload) })));
+    } catch (e) { console.error('app push failed', e.message); }
   }
   emailUsers(users, payload).catch((e) => console.error('email failed', e.message));
   return { sent };

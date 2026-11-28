@@ -47,3 +47,5 @@ services:
         sync: false
       - key: APP_URL
         sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
